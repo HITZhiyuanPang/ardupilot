@@ -1,29 +1,31 @@
+// system.cpp - ArduSub 系统初始化和启动流程
+// 包含：
+//   - init_ardupilot：主初始化函数（传感器、RC、电机、GCS、调度器等）
+//   - 启动自检（arming checks）
+//   - 飞行模式管理辅助函数
+
 #include "Sub.h"
 
-/*****************************************************************************
-*   The init_ardupilot function processes everything we need for an in - air restart
-*        We will determine later if we are actually on the ground and process a
-*        ground start in that case.
-*
-*****************************************************************************/
-
+// failsafe_check_static - 静态包装，供定时器中断调用（C 链接需要）
 static void failsafe_check_static()
 {
     sub.mainloop_failsafe_check();
 }
 
+// init_ardupilot - 主初始化函数
+// 处理硬件初始化（可能是空中重启，也可能是地面冷启动）
 void Sub::init_ardupilot()
 {
-    // initialise notify system
+    // 初始化通知系统（LED、蜂鸣器等）
     notify.init();
 
-    // initialise battery monitor
+    // 初始化电池监控
     battery.init();
 
     barometer.init();
 
 #if AP_FEATURE_BOARD_DETECT
-    // Detection won't work until after BoardConfig.init()
+    // 根据硬件板型设置外部气压计总线（水下 ROV 使用外部气压计作为深度传感器）
     switch (AP_BoardConfig::get_board_type()) {
     case AP_BoardConfig::PX4_BOARD_PIXHAWK2:
         AP_Param::set_default_by_name("BARO_EXT_BUS", 0);
@@ -36,25 +38,25 @@ void Sub::init_ardupilot()
         break;
     }
 #elif CONFIG_HAL_BOARD != HAL_BOARD_LINUX
+    // 非 Linux 板型默认使用外部总线 1
     AP_Param::set_default_by_name("BARO_EXT_BUS", 1);
 #endif
 
 #if AP_TEMPERATURE_SENSOR_ENABLED
-    // In order to preserve Sub's previous AP_TemperatureSensor Behavior we set the Default I2C Bus Here
+    // 保持与旧版 Sub 温度传感器行为兼容，设置默认 I2C 总线
     AP_Param::set_default_by_name("TEMP1_BUS", barometer.external_bus());
 #endif
 
-    // setup telem slots with serial ports
+    // 设置遥测串口
     gcs().setup_uarts();
 
-    // initialise rc channels including setting mode
+    // 初始化 RC 通道（包括模式转换）
     rc().convert_options(RC_Channel::AUX_FUNC::ARMDISARM_UNUSED, RC_Channel::AUX_FUNC::ARMDISARM);
     rc().init();
 
-
-    init_rc_in();               // sets up rc channels from radio
-    init_rc_out();              // sets up motors and output to escs
-    init_joystick();            // joystick initialization
+    init_rc_in();               // 初始化 RC 输入通道（6个控制轴）
+    init_rc_out();              // 初始化电机和 ESC 输出
+    init_joystick();            // 初始化摇杆（设置飞行模式和增益）
 
 #if AP_RELAY_ENABLED
     relay.init();

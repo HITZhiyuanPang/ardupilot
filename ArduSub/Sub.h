@@ -16,6 +16,9 @@
 /*
   This is the main Sub class
  */
+// Sub.h - ArduSub 主类声明
+// Sub 类继承自 AP_Vehicle，是整个潜航器飞控的核心
+// 所有子系统（传感器、导航、飞行模式、通信）均通过此类组织和调用
 
 ////////////////////////////////////////////////////////////////////////////////
 // Header includes
@@ -101,6 +104,7 @@
 
 class Sub : public AP_Vehicle {
 public:
+    // 允许这些类访问 Sub 的 private 成员
     friend class GCS_MAVLINK_Sub;
     friend class GCS_Sub;
     friend class Parameters;
@@ -130,18 +134,20 @@ protected:
 private:
 
     // Global parameters are all contained within the 'g' class.
+    // 全局参数（g = group1，g2 = group2，分别存储不同参数集）
     Parameters g;
     ParametersG2 g2;
 
     // primary input control channels
-    RC_Channel *channel_roll;
-    RC_Channel *channel_pitch;
-    RC_Channel *channel_throttle;
-    RC_Channel *channel_yaw;
-    RC_Channel *channel_forward;
-    RC_Channel *channel_lateral;
+    // 主要控制输入通道（来自遥控器或 MAVLink MANUAL_CONTROL）
+    RC_Channel *channel_roll;       // 横滚
+    RC_Channel *channel_pitch;      // 俯仰
+    RC_Channel *channel_throttle;   // 油门（垂直推力）
+    RC_Channel *channel_yaw;        // 偏航
+    RC_Channel *channel_forward;    // 纵向推力（水下特有）
+    RC_Channel *channel_lateral;    // 横向推力（水下特有）
 
-    AP_LeakDetector leak_detector;
+    AP_LeakDetector leak_detector;  // 漏水检测器
 
     struct {
         bool enabled;
@@ -197,12 +203,14 @@ private:
             uint8_t unused1             : 1; // was compass_init_location; true when the compass's initial location has been set
         };
         uint32_t value;
-    } ap;
+    } ap;   // 飞行器状态标志位集合（用位域节省内存）
 
     // This is the state of the flight control system
     // There are multiple states defined such as STABILIZE, ACRO,
+    // 当前飞行模式编号
     Mode::Number control_mode;
 
+    // 上一个飞行模式（用于模式切换回退）
     Mode::Number prev_control_mode;
 
 #if RCMAP_ENABLED
@@ -211,27 +219,27 @@ private:
 
     // Failsafe
     struct {
-        uint32_t last_leak_warn_ms;      // last time a leak warning was sent to gcs
-        uint32_t last_gcs_warn_ms;
-        uint32_t last_pilot_input_ms; // last time we received pilot input in the form of MANUAL_CONTROL or RC_CHANNELS_OVERRIDE messages
-        uint32_t terrain_first_failure_ms;  // the first time terrain data access failed - used to calculate the duration of the failure
-        uint32_t terrain_last_failure_ms;   // the most recent time terrain data access failed
-        uint32_t last_crash_warn_ms; // last time a crash warning was sent to gcs
-        uint32_t last_ekf_warn_ms; // last time an ekf warning was sent to gcs
+        uint32_t last_leak_warn_ms;      // 上次漏水警告发送时间（ms），防止频繁发送
+        uint32_t last_gcs_warn_ms;       // 上次 GCS 连接警告时间（ms）
+        uint32_t last_pilot_input_ms;    // 上次收到飞手输入的时间（MANUAL_CONTROL 或 RC 覆盖）
+        uint32_t terrain_first_failure_ms;  // 地形数据首次访问失败的时间（用于计算持续时长）
+        uint32_t terrain_last_failure_ms;   // 地形数据最近一次访问失败的时间
+        uint32_t last_crash_warn_ms;     // 上次撞击警告时间（ms）
+        uint32_t last_ekf_warn_ms;       // 上次 EKF 健康警告时间（ms）
 #if AP_SUB_RC_ENABLED
-        int8_t radio_counter;            // number of iterations with throttle below throttle_fs_value
-        uint8_t radio               : 1; // A status flag for the radio failsafe
+        int8_t radio_counter;            // 油门低于故障保护阈值的连续帧计数
+        uint8_t radio               : 1; // 遥控信号故障保护标志
 #endif    
 
-        uint8_t pilot_input          : 1; // true if pilot input failsafe is active, handles things like joystick being disconnected during operation
-        uint8_t gcs                  : 1; // A status flag for the ground station failsafe
-        uint8_t ekf                  : 1; // true if ekf failsafe has occurred
-        uint8_t terrain              : 1; // true if the missing terrain data failsafe has occurred
-        uint8_t leak                 : 1; // true if leak recently detected
-        uint8_t internal_pressure    : 1; // true if internal pressure is over threshold
-        uint8_t internal_temperature : 1; // true if temperature is over threshold
-        uint8_t crash                : 1; // true if we are crashed
-        uint8_t sensor_health        : 1; // true if at least one sensor has triggered a failsafe (currently only used for depth in depth enabled modes)
+        uint8_t pilot_input          : 1; // 飞手输入超时故障保护（如摇杆断连）
+        uint8_t gcs                  : 1; // 地面站连接故障保护
+        uint8_t ekf                  : 1; // EKF 姿态估计故障保护
+        uint8_t terrain              : 1; // 地形数据缺失故障保护
+        uint8_t leak                 : 1; // 漏水检测故障保护
+        uint8_t internal_pressure    : 1; // 内部气压超限故障保护
+        uint8_t internal_temperature : 1; // 内部温度超限故障保护
+        uint8_t crash                : 1; // 撞击检测故障保护
+        uint8_t sensor_health        : 1; // 传感器健康故障保护（当前仅深度传感器）
     } failsafe;
 
     bool any_failsafe_triggered() const {
@@ -251,51 +259,57 @@ private:
 
     // sensor health for logging
     struct {
-        uint8_t depth       : 1;    // true if depth sensor is healthy
-        uint8_t compass     : 1;    // true if compass is healthy
+        uint8_t depth       : 1;    // 深度传感器是否健康（外部气压计）
+        uint8_t compass     : 1;    // 罗盘是否健康
     } sensor_health;
 
     // Baro sensor instance index of the external water pressure sensor
+    // 外部水压传感器在气压计列表中的索引（用于获取深度数据）
     uint8_t depth_sensor_idx;
 
-    AP_Motors6DOF motors;
+    AP_Motors6DOF motors;           // 六自由度电机驱动（ArduSub 专用：支持任意推力方向）
 
     // Circle
-    bool circle_pilot_yaw_override; // true if pilot is overriding yaw
+    bool circle_pilot_yaw_override; // 圆形飞行中飞手是否手动控制偏航
 
     // Stores initial bearing when armed
-    int32_t initial_armed_bearing;
+    int32_t initial_armed_bearing;  // 解锁时的初始航向（centi-degrees），用于某些模式的偏航参考
 
     // Loiter control
-    uint16_t loiter_time_max;                // How long we should stay in Loiter Mode for mission scripting (time in seconds)
-    uint32_t loiter_time;                    // How long have we been loitering - The start time in millis
+    uint16_t loiter_time_max;       // 任务脚本中悬停模式的最大停留时间（秒）
+    uint32_t loiter_time;           // 当前悬停模式的开始时间（ms）
 
     // Delay the next navigation command
-    uint32_t nav_delay_time_max_ms;  // used for delaying the navigation commands
-    uint32_t nav_delay_time_start_ms;
+    uint32_t nav_delay_time_max_ms; // NAV_DELAY 命令的延迟时长（ms）
+    uint32_t nav_delay_time_start_ms; // NAV_DELAY 命令开始时间（ms）
 
     // Battery Sensors
     AP_BattMonitor battery{MASK_LOG_CURRENT,
                            FUNCTOR_BIND_MEMBER(&Sub::handle_battery_failsafe, void, const char*, const int8_t),
                            _failsafe_priorities};
 
-    AP_Arming_Sub arming;
+    AP_Arming_Sub arming;   // 解锁检查和解锁/加锁控制
 
     // Altitude
     // The cm/s we are moving up or down based on filtered data - Positive = UP
+    // 基于滤波数据计算的垂直速度（cm/s），正值表示上升
     int16_t climb_rate;
 
     // Turn counter
+    // 转向计数器，用于检测缆绳缠绕（每90度计一次）
     int32_t quarter_turn_count;
     uint8_t last_turn_state;
 
     // Input gain
+    // 控制输入增益（0.1~1.0），用于调节摇杆灵敏度
     float gain;
 
     // Flag indicating if we are currently using input hold
+    // 是否处于输入保持模式（保持最后一次飞手输入）
     bool input_hold_engaged;
 
     // Flag indicating if we are currently controlling Pitch and Roll instead of forward/lateral
+    // 为 true 时摇杆控制横滚/俯仰，为 false 时控制前进/横移
     bool roll_pitch_flag = false;
 
     // 3D Location vectors

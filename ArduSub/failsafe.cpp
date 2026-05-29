@@ -1,3 +1,14 @@
+// failsafe.cpp - ArduSub 故障保护检查与响应
+// 包含：
+//   - 主循环死锁看门狗（mainloop_failsafe）
+//   - 传感器健康检查（深度传感器）
+//   - 漏水检测
+//   - GCS 心跳超时
+//   - 飞手输入超时
+//   - EKF 姿态估计失效
+//   - 电池故障保护
+//   - 撞击检测
+
 #include "Sub.h"
 
 /*
@@ -5,34 +16,38 @@
  * Failsafe checks and actions
  */
 
+// 主循环看门狗状态变量（static 限制在本文件作用域）
 static bool failsafe_enabled = false;
 static uint16_t failsafe_last_ticks;
 static uint32_t failsafe_last_timestamp;
 static bool in_failsafe;
 
-// Enable mainloop lockup failsafe
+// mainloop_failsafe_enable - 启用主循环看门狗
+// 解锁完成后调用，开始监控主循环是否正常运行
 void Sub::mainloop_failsafe_enable()
 {
     failsafe_enabled = true;
     failsafe_last_timestamp = AP_HAL::micros();
 }
 
-// Disable mainloop lockup failsafe
-// Used when we know we are going to delay the mainloop significantly.
+// mainloop_failsafe_disable - 暂时禁用主循环看门狗
+// 在已知会延长主循环（如解锁初始化）期间调用，防止误触发
 void Sub::mainloop_failsafe_disable()
 {
     failsafe_enabled = false;
 }
 
-// This function is called from the core timer interrupt at 1kHz.
-// This checks that the mainloop is running, and has not locked up.
+// mainloop_failsafe_check - 主循环死锁检测（由定时器中断以 1kHz 调用）
+// 检测主循环是否超过 2 秒未运行：
+//   - 超过 2s：降低电机输出并记录错误
+//   - 超过 3s：每秒执行一次加锁
 void Sub::mainloop_failsafe_check()
 {
     uint32_t tnow = AP_HAL::micros();
 
     const uint16_t ticks = scheduler.ticks();
     if (ticks != failsafe_last_ticks) {
-        // the main loop is running, all is OK
+        // 主循环正常运行，重置计时器
         failsafe_last_ticks = ticks;
         failsafe_last_timestamp = tnow;
         if (in_failsafe) {
@@ -43,11 +58,9 @@ void Sub::mainloop_failsafe_check()
     }
 
     if (!in_failsafe && failsafe_enabled && tnow - failsafe_last_timestamp > 2000000) {
-        // motors are running but we have gone 2 second since the
-        // main loop ran. That means we're in trouble and should
-        // disarm the motors.
+        // 电机运行但主循环 2 秒未更新，进入故障保护
+        // 先降低电机输出（不立即加锁，以便记录日志）
         in_failsafe = true;
-        // reduce motors to minimum (we do not immediately disarm because we want to log the failure)
         if (motors.armed()) {
             motors.output_min();
         }
@@ -55,7 +68,7 @@ void Sub::mainloop_failsafe_check()
     }
 
     if (failsafe_enabled && in_failsafe && tnow - failsafe_last_timestamp > 1000000) {
-        // disarm motors every second
+        // 故障保护已触发，每秒尝试一次加锁
         failsafe_last_timestamp = tnow;
         if (motors.armed()) {
             motors.armed(false);
@@ -64,13 +77,15 @@ void Sub::mainloop_failsafe_check()
     }
 }
 
+// failsafe_sensors_check - 传感器健康故障保护
+// 当深度传感器不健康时触发（自动模式依赖深度传感器）
 void Sub::failsafe_sensors_check()
 {
     if (!ap.depth_sensor_present) {
         return;
     }
 
-    // We need a depth sensor to do any sort of auto z control
+    // 深度控制需要深度传感器，不健康则触发故障保护
     if (sensor_health.depth) {
         if (failsafe.sensor_health) {
             LOGGER_WRITE_ERROR(LogErrorSubsystem::FAILSAFE_SENSORS, LogErrorCode::ERROR_RESOLVED);

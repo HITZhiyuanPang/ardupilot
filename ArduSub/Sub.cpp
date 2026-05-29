@@ -24,6 +24,9 @@ const AP_HAL::HAL& hal = AP_HAL::get_HAL();
 /*
   constructor for main Sub class
  */
+// Sub 构造函数
+// 初始化各子系统对象，建立引用关系
+// 注意：此时硬件尚未初始化，只是 C++ 对象的构造
 Sub::Sub()
     :
 
@@ -50,17 +53,15 @@ Sub::Sub()
     _singleton = this;
 }
 
+// 宏定义：简化调度表中的任务条目书写
+// SCHED_TASK 针对 Sub 类方法，FAST_TASK 针对每帧都运行的高优先级任务
 #define SCHED_TASK(func, rate_hz, max_time_micros, priority) SCHED_TASK_CLASS(Sub, &sub, func, rate_hz, max_time_micros, priority)
 #define FAST_TASK(func) FAST_TASK_CLASS(Sub, &sub, func)
 
 /*
   scheduler table - all tasks should be listed here.
-
-  All entries in this table must be ordered by priority.
-
-  This table is interleaved with the table in AP_Vehicle to determine
-  the order in which tasks are run.  Convenience methods SCHED_TASK
-  and SCHED_TASK_CLASS are provided to build entries in this structure:
+  调度表：列出所有周期性任务，按优先级顺序排列
+  与 AP_Vehicle 中的任务表交错执行
 
 SCHED_TASK arguments:
  - name of static function to call
@@ -79,21 +80,21 @@ SCHED_TASK_CLASS arguments:
  */
 
 const AP_Scheduler::Task Sub::scheduler_tasks[] = {
-    // update INS immediately to get current gyro data populated
+    // 立即更新 IMU，获取最新陀螺仪数据（最高优先级）
     FAST_TASK_CLASS(AP_InertialSensor, &sub.ins, update),
-    // run low level rate controllers that only require IMU data
+    // 运行低级别角速率控制器（仅需 IMU 数据）
     FAST_TASK(run_rate_controller),
-    // send outputs to the motors library immediately
+    // 立即将输出发送给电机库
     FAST_TASK(motors_output),
-     // run EKF state estimator (expensive)
+     // 运行 EKF 状态估计器（计算量较大）
     FAST_TASK(read_AHRS),
-    // Inertial Nav
+    // 惯性导航：从 EKF 读取位置/速度
     FAST_TASK(read_inertia),
-    // check if ekf has reset target heading
+    // 检查 EKF 是否重置了目标航向
     FAST_TASK(check_ekf_yaw_reset),
-    // run the attitude controllers
+    // 运行飞行模式控制器（姿态控制输出）
     FAST_TASK(update_flight_mode),
-    // update home from EKF if necessary
+    // 如有需要则从 EKF 更新 home 位置
     FAST_TASK(update_home_from_EKF),
     // check if we've reached the surface or bottom
     FAST_TASK(update_surface_and_bottom_detector),
@@ -170,24 +171,28 @@ void Sub::get_scheduler_tasks(const AP_Scheduler::Task *&tasks,
 
 constexpr int8_t Sub::_failsafe_priorities[5];
 
+// run_rate_controller - 运行低级角速率控制器（在每个主循环周期执行）
+// 设置控制器时间步长，手动模式和电机检测模式下跳过角速率控制
 void Sub::run_rate_controller()
 {
     const float last_loop_time_s = AP::scheduler().get_last_loop_time_s();
+    // 更新各控制器的时间步长（dt）
     motors.set_dt_s(last_loop_time_s);
     attitude_control.set_dt_s(last_loop_time_s);
     pos_control.set_dt_s(last_loop_time_s);
 
-    //don't run rate controller in manual or motordetection modes
+    // 手动模式和电机检测模式不运行角速率控制器（直接透传飞手输入）
     if (control_mode != Mode::Number::MANUAL && control_mode != Mode::Number::MOTOR_DETECT) {
         // run low level rate controllers that only require IMU data and set loop time
         attitude_control.rate_controller_run();
     }
 }
 
-// 50 Hz tasks
+// fifty_hz_loop - 50Hz 任务循环
+// 执行飞手输入超时检查、撞击检测、EKF 检查、传感器健康检查和执行器更新
 void Sub::fifty_hz_loop()
 {
-    // check pilot input failsafe
+    // 检查飞手输入超时故障保护
     failsafe_pilot_input_check();
 
     failsafe_crash_check();
@@ -198,18 +203,19 @@ void Sub::fifty_hz_loop()
 #if !AP_SUB_RC_ENABLED
     rc().read_input();
 #endif
+    // 更新辅助执行器 PWM 输出（夹爪等外设）
     g2.actuators.update_actuators();
 }
 
-// update_batt_compass - read battery and compass
-// should be called at 10hz
+// update_batt_compass - 读取电池和罗盘数据（10Hz）
+// 先读电池是因为可能用于电机干扰补偿
 void Sub::update_batt_compass()
 {
     // read battery before compass because it may be used for motor interference compensation
     battery.read();
 
     if (AP::compass().available()) {
-        // update compass with throttle value - used for compassmot
+        // 将当前油门值传给罗盘（用于 compassmot 电机磁场干扰补偿）
         compass.set_throttle(motors.get_throttle());
         compass.read();
     }

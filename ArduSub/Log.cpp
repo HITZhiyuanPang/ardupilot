@@ -1,31 +1,38 @@
+// Log.cpp - ArduSub 数据记录（黑匣子）
+// 将关键飞控数据写入 SD 卡日志（用于后期分析和调试）
+// 包含：
+//   - LOG_CONTROL_TUNING：控制回路调试数据（油门、高度、爬升率）
+//   - LOG_ATTITUDE：姿态数据（滚转、俯仰、偏航）
+//   - LOG_DATA_*：通用数据通道（电机值等）
+//   - LOG_MOTOR：6DOF 电机输出数据
+
 #include "Sub.h"
 
 #if HAL_LOGGING_ENABLED
 
-// Code to Write and Read packets from AP_Logger log memory
-// Code to interact with the user to dump or erase logs
-
+// log_Control_Tuning 数据包结构
+// 记录控制回路的输入/输出，用于 PID 调参分析
 struct PACKED log_Control_Tuning {
     LOG_PACKET_HEADER;
-    uint64_t time_us;
-    float  throttle_in;
-    float  angle_boost;
-    float    throttle_out;
-    float    throttle_hover;
-    float    desired_alt;
-    float    inav_alt;
-    float    baro_alt;
-    float    desired_rangefinder_alt;
-    float    rangefinder_alt;
-    float    terr_alt;
-    int16_t  target_climb_rate;
-    int16_t  climb_rate;
+    uint64_t time_us;                   // 时间戳（微秒）
+    float  throttle_in;                  // 飞手油门输入（0~1）
+    float  angle_boost;                  // 姿态角增益补偿
+    float    throttle_out;               // 最终油门输出（0~1）
+    float    throttle_hover;             // 悬停油门估计值
+    float    desired_alt;                // 目标高度（m）
+    float    inav_alt;                   // EKF 估计高度（m）
+    float    baro_alt;                   // 气压计高度（m）
+    float    desired_rangefinder_alt;    // 测距仪目标距离（m，SURFTRAK 模式）
+    float    rangefinder_alt;            // 测距仪实测距离（m）
+    float    terr_alt;                   // 地形高度（m）
+    int16_t  target_climb_rate;          // 目标爬升速率（cm/s）
+    int16_t  climb_rate;                 // 实际爬升速率（cm/s）
 };
 
-// Write a control tuning packet
+// Log_Write_Control_Tuning - 写入控制调参日志包
 void Sub::Log_Write_Control_Tuning()
 {
-    // get terrain altitude
+    // 获取地形高度（优先使用 AP_TERRAIN，否则用测距仪偏移）
     float terr_alt = 0.0f;
 #if AP_TERRAIN_AVAILABLE
     if (terrain.enabled()) {
@@ -56,7 +63,7 @@ void Sub::Log_Write_Control_Tuning()
     logger.WriteBlock(&pkt, sizeof(pkt));
 }
 
-// Write an attitude packet
+// Log_Write_Attitude - 写入姿态日志包
 void Sub::Log_Write_Attitude()
 {
     ahrs.Write_Attitude(attitude_control.get_att_target_euler_rad() * RAD_TO_DEG);

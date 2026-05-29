@@ -1,7 +1,15 @@
+// radio.cpp - RC 输入/输出初始化和读取
+// ArduSub 主要通过 MAVLink MANUAL_CONTROL 覆盖 RC 通道
+// 如果编译了 AP_SUB_RC_ENABLED，也支持传统 RC 接收机
+// 包含 6 个控制通道：滚转、俯仰、油门、偏航、前进、横移
+
 #include "Sub.h"
 
+// init_rc_in - 初始化遥控输入通道
+// 绑定通道指针，设置量程、死区，并将初始值设为中立点（1500）
 void Sub::init_rc_in()
 {
+    // 绑定 6 个控制通道到全局指针
     channel_roll     = &rc().get_roll_channel();
     channel_pitch    = &rc().get_pitch_channel();
     channel_throttle = &rc().get_throttle_channel();
@@ -9,15 +17,15 @@ void Sub::init_rc_in()
     channel_forward  = &rc().get_forward_channel();
     channel_lateral  = &rc().get_lateral_channel();
 
-    // set rc channel ranges
+    // 设置通道量程（set_angle 表示对称 ±N，set_range 表示单极性 0~N）
     channel_roll->set_angle(ROLL_PITCH_INPUT_MAX);
     channel_pitch->set_angle(ROLL_PITCH_INPUT_MAX);
     channel_yaw->set_angle(ROLL_PITCH_INPUT_MAX);
-    channel_throttle->set_range(1000);
+    channel_throttle->set_range(1000);   // 油门 0~1000
     channel_forward->set_angle(ROLL_PITCH_INPUT_MAX);
     channel_lateral->set_angle(ROLL_PITCH_INPUT_MAX);
 
-    // set default dead zones
+    // 设置默认死区（偏航稍大，因为偏航控制更敏感）
     channel_roll->set_default_dead_zone(30);
     channel_pitch->set_default_dead_zone(30);
     channel_throttle->set_default_dead_zone(30);
@@ -25,7 +33,7 @@ void Sub::init_rc_in()
     channel_forward->set_default_dead_zone(30);
     channel_lateral->set_default_dead_zone(30);
 
-    // initialize rc input to 1500 on control channels (rather than 0)
+    // 将所有控制通道初始化为中立值 1500（避免开机时误动作）
     uint32_t tnow = AP_HAL::millis();
     channel_roll->set_override(1500, tnow);
     channel_pitch->set_override(1500, tnow);
@@ -35,7 +43,7 @@ void Sub::init_rc_in()
     channel_lateral->set_override(1500, tnow);
 
 #if HAL_MOUNT_ENABLED
-    // initialize camera mount RC inputs to centered
+    // 初始化相机云台 RC 输入为中立值
     RC_Channel *cam_pan_chan = rc().find_channel_for_option(RC_Channel::AUX_FUNC::MOUNT1_YAW);
     if (cam_pan_chan != nullptr) {
         cam_pan_chan->set_override(1500, tnow);
@@ -47,20 +55,22 @@ void Sub::init_rc_in()
 #endif  // HAL_MOUNT_ENABLED
 }
 
-// init_rc_out -- initialise motors and check if pilot wants to perform ESC calibration
+// init_rc_out - 初始化推进器输出
+// 设置 ESC 刷新率、电机框架类型，并在校准通过后使能输出
 void Sub::init_rc_out()
 {
-    motors.set_update_rate(g.rc_speed);
+    motors.set_update_rate(g.rc_speed);   // 设置 PWM 刷新率（默认 490Hz）
+    // 根据 FRAME_CONFIG 参数初始化电机框架（如 BlueROV2 Heavy 6DOF）
     motors.init((AP_Motors::motor_frame_class)g.frame_configuration.get(), AP_Motors::motor_frame_type::MOTOR_FRAME_TYPE_PLUS);
     motors.convert_pwm_min_max_param(channel_throttle->get_radio_min(), channel_throttle->get_radio_max());
     motors.update_throttle_range();
 
-    // enable output to motors
+    // 如果 RC 校准通过，使能电机输出（防止未校准时输出错误 PWM）
     if (arming.rc_calibration_checks(true)) {
         enable_motor_output();
     }
 
-    // refresh auxiliary channel to function map
+    // 刷新辅助通道到功能的映射
     SRV_Channels::update_aux_servo_function();
 }
 #if AP_SUB_RC_ENABLED

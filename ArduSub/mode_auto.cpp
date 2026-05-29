@@ -1,80 +1,81 @@
+// mode_auto.cpp - 自动任务模式（Auto Mode）
+// 执行预先上传的飞行任务（waypoint mission）
+// 包含多个子模式（auto_mode）：
+//   Auto_WP：飞向单个航点（waypoint）
+//   Auto_Circle：圆形绕飞
+//   Auto_CircleMoveToEdge：移动到圆形轨迹起始点
+//   Auto_NavGuided：嵌入式引导（外部计算机实时控制）
+//   Auto_Loiter：悬停（任务暂停）
+//   Auto_TerrainRecover：地形恢复（测距仪恢复后继续任务）
+// 需要 GPS 锁定和已上传任务
+
 #include "Sub.h"
 
-/*
- * control_auto.cpp
- *  Contains the mission, waypoint navigation and NAV_CMD item implementation
- *
- *  While in the auto flight mode, navigation or do/now commands can be run.
- *  Code in this file implements the navigation commands
- */
 bool ModeAuto::init(bool ignore_checks) {
-     if (!sub.position_ok() || !sub.mission.present()) {
+    // 需要 GPS 锁定且任务不为空
+    if (!sub.position_ok() || !sub.mission.present()) {
         return false;
     }
 
-    sub.auto_mode = Auto_Loiter;
+    sub.auto_mode = Auto_Loiter;  // 初始子模式为悬停
 
-    // stop ROI from carrying over from previous runs of the mission
-    // To-Do: reset the yaw as part of auto_wp_start when the previous command was not a wp command to remove the need for this special ROI check
+    // 清除之前任务残留的 ROI 偏航模式
     if (sub.auto_yaw_mode == AUTO_YAW_ROI) {
         set_auto_yaw_mode(AUTO_YAW_HOLD);
     }
 
-    // initialise waypoint controller
+    // 初始化航点控制器
     sub.wp_nav.wp_and_spline_init_m();
 
-    // clear guided limits
+    // 清除引导模式的边界限制
     guided_limit_clear();
 
-    // start/resume the mission (based on MIS_RESTART parameter)
+    // 根据 MIS_RESTART 参数决定从头开始还是续飞
     sub.mission.start_or_resume();
     return true;
 }
 
-// auto_run - runs the appropriate auto controller
-// according to the current auto_mode
+// auto_run - 根据当前 auto_mode 子模式调用对应的控制器
 void ModeAuto::run()
 {
-    sub.mission.update();
+    sub.mission.update();  // 推进任务状态机（检查是否需要切换到下一条命令）
 
-    // call the correct auto controller
     switch (sub.auto_mode) {
 
     case Auto_WP:
     case Auto_CircleMoveToEdge:
-        auto_wp_run();
+        auto_wp_run();          // 飞向航点
         break;
 
     case Auto_Circle:
-        auto_circle_run();
+        auto_circle_run();      // 圆形绕飞
         break;
 
     case Auto_NavGuided:
 #if NAV_GUIDED
-        auto_nav_guided_run();
+        auto_nav_guided_run(); // 嵌入式引导（外部计算机）
 #endif
         break;
 
     case Auto_Loiter:
-        auto_loiter_run();
+        auto_loiter_run();     // 悬停保持
         break;
 
     case Auto_TerrainRecover:
-        auto_terrain_recover_run();
+        auto_terrain_recover_run(); // 地形恢复
         break;
     }
 }
 
-// auto_wp_start - initialises waypoint controller to implement flying to a particular destination
+// auto_wp_start - 初始化航点控制器，飞向目标位置
 void ModeAuto::auto_wp_start(const Vector3f& destination)
 {
     sub.auto_mode = Auto_WP;
 
-    // initialise wpnav (no need to check return status because terrain data is not used)
+    // 设置目标位置（NEU 坐标系，cm）（不使用地形跟随）
     sub.wp_nav.set_wp_destination_NEU_cm(destination, false);
 
-    // initialise yaw
-    // To-Do: reset the yaw only when the previous navigation command is not a WP.  this would allow removing the special check for ROI
+    // 初始化偏航模式（如果不是 ROI 模式则使用默认偏航行为）
     if (sub.auto_yaw_mode != AUTO_YAW_ROI) {
         set_auto_yaw_mode(get_default_auto_yaw_mode(false));
     }

@@ -1,3 +1,17 @@
+// joystick.cpp - 摇杆/游戏手柄输入处理
+// ArduSub 主要通过 MAVLink MANUAL_CONTROL 消息接收摇杆输入（来自 QGroundControl 等地面站）
+// 此文件将摇杆轴值和按钮状态转换为飞控内部的 RC 覆盖值和功能触发
+//
+// 代码主流程（按数据流）：
+// 1) init_joystick(): 初始化默认按钮映射与控制增益
+// 2) transform_manual_control_to_rc_override():
+//    - 解析 MANUAL_CONTROL 的轴与按钮
+//    - 处理 shift 修饰键与按钮按下/松开事件
+//    - 根据当前控制模式把输入映射到 RC 通道覆盖值
+// 3) handle_jsbutton_press/release(): 执行具体按钮动作（模式切换、灯光、继电器、执行器等）
+// 4) default_js_buttons()/get_button(): 管理按钮参数与默认功能映射
+// 5) set_neutral_controls()/clear_input_hold(): 控制输入复位与 Input Hold 状态管理
+
 #include "Sub.h"
 #include "mode.h"
 
@@ -7,45 +21,56 @@
 // Anonymous namespace to hold variables used only in this file
 namespace {
 #if HAL_MOUNT_ENABLED
-float cam_tilt = 1500.0;
-float cam_pan = 1500.0;
+float cam_tilt = 1500.0;  // 相机俯仰（PWM，1500=中立）
+float cam_pan = 1500.0;   // 相机偏航（PWM，1500=中立）
 #endif  // HAL_MOUNT_ENABLED
-float lights1 = 0;
-float lights2 = 0;
-int16_t rollTrim = 0;
-int16_t pitchTrim = 0;
-int16_t zTrim = 0;
-int16_t xTrim = 0;
-int16_t yTrim = 0;
-int16_t x_last, y_last, z_last;
-uint32_t buttons_prev;
+float lights1 = 0;        // 灯光1亮度（归一化，0~1）
+float lights2 = 0;        // 灯光2亮度（归一化，0~1）
+int16_t rollTrim = 0;     // 横滚微调值（centi-degrees）
+int16_t pitchTrim = 0;    // 俯仰微调值
+int16_t zTrim = 0;        // 垂直微调
+int16_t xTrim = 0;        // 前进微调
+int16_t yTrim = 0;        // 横移微调
+int16_t x_last, y_last, z_last;   // 上一帧的 XYZ 输入，用于检测变化
+uint32_t buttons_prev;    // 上一帧的按钮状态（用于边沿检测）
 
-bool controls_reset_since_input_hold = true;
+bool controls_reset_since_input_hold = true;  // 松开 hold 后是否已重置控制输入
 }
 
+// init_joystick - 摇杆初始化
+// 设置默认按钮映射、初始化飞行模式和增益
 void Sub::init_joystick()
 {
+    // 为按钮 1~16 写入默认功能（含 shift 二级功能）
     default_js_buttons();
 
-    set_mode(Mode::Number::MANUAL, ModeReason::RC_COMMAND); // Initialize flight mode
+    // 上电默认进入手动模式
+    set_mode(Mode::Number::MANUAL, ModeReason::RC_COMMAND);
 
     if (g.numGainSettings < 1) {
         g.numGainSettings.set_and_save(1);
     }
 
     if (g.numGainSettings == 1 || (g.gain_default < g.maxGain + 0.01 && g.gain_default > g.minGain - 0.01)) {
-        gain = constrain_float(g.gain_default, g.minGain, g.maxGain); // Use default gain parameter
+        // 使用参数中的默认增益（限制在 minGain ~ maxGain 范围内）
+        gain = constrain_float(g.gain_default, g.minGain, g.maxGain);
     } else {
-        // Use setting closest to average of minGain and maxGain
+        // 使用最接近 minGain 和 maxGain 平均值的增益档位
         gain = g.minGain + (g.numGainSettings/2 - 1) * (g.maxGain - g.minGain) / (g.numGainSettings - 1);
     }
 
+    // 最终保险限幅，避免异常参数导致操控过钝或过激。
     gain = constrain_float(gain, 0.1, 1.0);
+    // 初始化灯光和视频切换输出
     SRV_Channels::set_output_scaled(SRV_Channel::k_lights1, 0.0);
     SRV_Channels::set_output_scaled(SRV_Channel::k_lights2, 0.0);
     SRV_Channels::set_output_scaled(SRV_Channel::k_video_switch, 0.0);
 }
 
+// transform_manual_control_to_rc_override - 将 MAVLink MANUAL_CONTROL 消息转换为 RC 覆盖值
+// 参数说明（MAVLink 协议，范围 -1000 ~ +1000，油门 0 ~ 1000）：
+//   x: 前进（正=前进）  y: 横移（正=右）  z: 油门（0=停，1000=最大）  r: 偏航（正=右转）
+//   buttons/buttons2: 32位按钮状态位图  s/t/aux1~6: 扩展轴
 void Sub::transform_manual_control_to_rc_override(int16_t x, int16_t y, int16_t z, int16_t r, uint16_t buttons, uint16_t buttons2, uint8_t enabled_extensions,
             int16_t s,
             int16_t t,
@@ -57,29 +82,43 @@ void Sub::transform_manual_control_to_rc_override(int16_t x, int16_t y, int16_t 
             int16_t aux6)
 {
 
-    float rpyScale = 0.4*gain; // Scale -1000-1000 to -400-400 with gain
-    float throttleScale = 0.8*gain*g.throttle_gain; // Scale 0-1000 to 0-800 times gain
-    int16_t rpyCenter = 1500;
-    int16_t throttleBase = 1500-500*throttleScale;
+    // 当前实现使用 x/y/z/r 与 s/t；aux1~aux6 预留给扩展输入，暂未参与控制映射。
+    (void)enabled_extensions;
+    (void)aux1;
+    (void)aux2;
+    (void)aux3;
+    (void)aux4;
+    (void)aux5;
+    (void)aux6;
 
-    bool shift = false;
+    // rpyScale：将 -1000~1000 缩放到 -400~400（乘以增益）
+    float rpyScale = 0.4*gain;
+    // throttleScale：将 0~1000 缩放到 0~800（乘以增益和节流增益参数）
+    float throttleScale = 0.8*gain*g.throttle_gain;
+    int16_t rpyCenter = 1500;      // RC 中立点 PWM
+    int16_t throttleBase = 1500-500*throttleScale;  // 油门零点对应的 PWM 值
+
+    bool shift = false;  // shift 修饰键状态（改变按钮功能）
 
 #if HAL_MOUNT_ENABLED
-    // Neutralize camera tilt and pan speed setpoint
+    // 每帧重置相机速度设定点为中立（避免遗留运动）
     cam_tilt = 1500;
     cam_pan = 1500;
 #endif  // HAL_MOUNT_ENABLED
 
     uint32_t all_buttons = buttons | (buttons2 << 16);
-    // Detect if any shift button is pressed
+    // 先扫描一遍 shift：
+    // 若任意已按下按钮被配置为 k_shift，则本帧按键动作按“shift层映射”解释。
     for (uint8_t i = 0 ; i < 32 ; i++) {
         if ((all_buttons & (1 << i)) && get_button(i)->function() == JSButton::button_function_t::k_shift) {
             shift = true;
         }
     }
 
-    // Act if button is pressed
-    // Only act upon pressing button and ignore holding. This provides compatibility with Taranis as joystick.
+    // 对每个按钮做“边沿触发”处理：
+    // - 当前按下：进入 press 逻辑，held 表示是不是长按重复帧
+    // - 当前松开且上一帧按下：进入 release 逻辑
+    // 这样可避免长按导致某些切换类功能反复触发，兼容把遥控器当摇杆的场景。
     for (uint8_t i = 0 ; i < 32 ; i++) {
         if ((all_buttons & (1 << i))) {
             handle_jsbutton_press(i,shift,(buttons_prev & (1 << i)));
@@ -91,7 +130,8 @@ void Sub::transform_manual_control_to_rc_override(int16_t x, int16_t y, int16_t 
 
     buttons_prev = all_buttons;
 
-    // attitude mode:
+    // 姿态微调模式：
+    // roll_pitch_flag=1 时，x/y 不再表示平移，而用于实时调节 pitch/roll trim。
     if (roll_pitch_flag == 1) {
     // adjust roll/pitch trim with joystick input instead of forward/lateral
         pitchTrim = -x * rpyScale;
@@ -105,10 +145,12 @@ void Sub::transform_manual_control_to_rc_override(int16_t x, int16_t y, int16_t 
     int16_t xTot;
 
     if (!controls_reset_since_input_hold) {
+        // Input Hold 刚退出后进入“保护期”：
+        // 在摇杆三轴回中前，继续使用锁定的 trim 值，防止突然跳变。
         zTot = zTrim + 500; // 500 is neutral for throttle
         yTot = yTrim;
         xTot = xTrim;
-        // if all 3 axes return to neutral, than we're ready to accept input again
+        // 三轴都回中后，恢复接受实时输入。
         controls_reset_since_input_hold = (abs(z - 500) < 50) && (abs(y) < 50) && (abs(x) < 50);
     } else {
         zTot = z + zTrim;
@@ -116,13 +158,14 @@ void Sub::transform_manual_control_to_rc_override(int16_t x, int16_t y, int16_t 
         xTot = x + xTrim;
     }
 
+    // 先写入姿态/油门四通道。
     channel_pitch->set_override(constrain_int16(s + pitchTrim + rpyCenter,1100,1900), tnow);
     channel_roll->set_override(constrain_int16(t + rollTrim  + rpyCenter,1100,1900), tnow);
 
     channel_throttle->set_override(constrain_int16((zTot)*throttleScale+throttleBase,1100,1900), tnow);
     channel_yaw->set_override(constrain_int16(r*rpyScale+rpyCenter,1100,1900), tnow);
 
-    // maneuver mode:
+    // 再根据 roll_pitch_flag 决定 x/y 是“平移控制”还是“仅保留微调”。
     if (roll_pitch_flag == 0) {
         // adjust forward and lateral with joystick input instead of roll and pitch
         channel_forward->set_override(constrain_int16((xTot)*rpyScale+rpyCenter,1100,1900), tnow);
@@ -134,6 +177,7 @@ void Sub::transform_manual_control_to_rc_override(int16_t x, int16_t y, int16_t 
     }
 
 #if HAL_MOUNT_ENABLED
+    // 相机云台通道是可选的；只有在通道存在时才覆盖。
     RC_Channel *cam_pan_chan = rc().find_channel_for_option(RC_Channel::AUX_FUNC::MOUNT1_YAW);
     if (cam_pan_chan != nullptr) {
         cam_pan_chan->set_override(cam_pan, tnow);
@@ -144,7 +188,7 @@ void Sub::transform_manual_control_to_rc_override(int16_t x, int16_t y, int16_t 
     }
 #endif  // HAL_MOUNT_ENABLED
 
-    // Store old x, y, z values for use in input hold logic
+    // 记录上一帧输入，供 Input Hold 在按键触发时抓取“当前操纵量”。
     x_last = x;
     y_last = y;
     z_last = z;
@@ -152,7 +196,7 @@ void Sub::transform_manual_control_to_rc_override(int16_t x, int16_t y, int16_t 
 
 void Sub::handle_jsbutton_press(uint8_t _button, bool shift, bool held)
 {
-    // Act based on the function assigned to this button
+    // 根据按钮映射执行动作；多数“切换类”动作只在 held=false 的按下沿触发一次。
     switch (get_button(_button)->function(shift)) {
     case JSButton::button_function_t::k_arm_toggle:
         if (motors.armed()) {
@@ -235,6 +279,7 @@ void Sub::handle_jsbutton_press(uint8_t _button, bool shift, bool held)
 #endif  // HAL_MOUNT_ENABLED
     case JSButton::button_function_t::k_lights1_cycle:
         if (!held) {
+            // 循环亮度通过静态方向位实现“到端点后反向”。
             static bool increasing = true;
             uint16_t step = 1000.0 / g.lights_steps;
             if (increasing) {
@@ -264,6 +309,7 @@ void Sub::handle_jsbutton_press(uint8_t _button, bool shift, bool held)
         break;
     case JSButton::button_function_t::k_lights2_cycle:
        if (!held) {
+            // 与 lights1 同逻辑，独立维护亮度与方向。
             static bool increasing = true;
             uint16_t step = 1000.0 / g.lights_steps;
             if (increasing) {
@@ -293,6 +339,7 @@ void Sub::handle_jsbutton_press(uint8_t _button, bool shift, bool held)
         break;
     case JSButton::button_function_t::k_gain_toggle:
         if (!held) {
+            // 兼容旧习惯：在 50% 与 100% 两档之间切换。
             static bool lowGain = false;
             lowGain = !lowGain;
             if (lowGain) {
@@ -352,6 +399,7 @@ void Sub::handle_jsbutton_press(uint8_t _button, bool shift, bool held)
             break;
         }
         if (!held) {
+            // 只在输入偏离中位时锁定 trim，避免把噪声当成 hold 值。
             zTrim = abs(z_last-500) > 50 ? z_last-500 : 0;
             xTrim = abs(x_last) > 50 ? x_last : 0;
             yTrim = abs(y_last) > 50 ? y_last : 0;
@@ -435,6 +483,7 @@ void Sub::handle_jsbutton_press(uint8_t _button, bool shift, bool held)
     ////////////////////////////////////////////////
     // Servo functions
 #if AP_SERVORELAYEVENTS_ENABLED
+    // 执行器控制统一委托给 g2.actuators，内部再映射到 SERVO9~14 等输出通道。
     case JSButton::button_function_t::k_servo_1_inc:
         sub.g2.actuators.increase_actuator(0);
         break;
@@ -603,6 +652,7 @@ void Sub::handle_jsbutton_press(uint8_t _button, bool shift, bool held)
 
     case JSButton::button_function_t::k_roll_pitch_toggle:
         if (!held) {
+            // 在“移动控制”和“姿态微调控制”两种 x/y 解释方式间切换。
             roll_pitch_flag = !roll_pitch_flag;
             if (roll_pitch_flag) {
                 gcs().send_text(MAV_SEVERITY_INFO, "#Attitude Control");
@@ -651,7 +701,9 @@ void Sub::handle_jsbutton_press(uint8_t _button, bool shift, bool held)
 
 void Sub::handle_jsbutton_release(uint8_t _button, bool shift) {
 
-    // Act based on the function assigned to this button
+    // 松开事件主要用于“瞬时类”动作复位：
+    // - momentary relay 松开即断
+    // - momentary servo(min/max) 松开回中
     switch (get_button(_button)->function(shift)) {
 #if AP_RELAY_ENABLED
     case JSButton::button_function_t::k_relay_1_momentary:
@@ -725,7 +777,8 @@ void Sub::handle_jsbutton_release(uint8_t _button, bool shift) {
 
 JSButton* Sub::get_button(uint8_t index)
 {
-    // Help to access appropriate parameter
+    // 将按钮编号映射到参数对象（jbtn_0~jbtn_31）。
+    // 这样按钮功能可以直接由参数系统保存/读取。
     switch (index) {
     case 0:
         return &g.jbtn_0;
@@ -800,6 +853,8 @@ JSButton* Sub::get_button(uint8_t index)
 
 void Sub::default_js_buttons()
 {
+    // defaults[i][0] = 普通层功能；defaults[i][1] = 按住 shift 后的功能。
+    // 仅对前 16 个按钮提供默认映射，16~31 默认为 none，由用户按需配置。
     JSButton::button_function_t defaults[16][2] = {
         {JSButton::button_function_t::k_none,                   JSButton::button_function_t::k_none},
         {JSButton::button_function_t::k_mode_manual,            JSButton::button_function_t::k_none},
@@ -829,6 +884,7 @@ void Sub::default_js_buttons()
 
 void Sub::set_neutral_controls()
 {
+    // 将 6 个主控制通道回到各自 radio trim，作为“控制归中”入口。
     channel_roll->set_radio_in(channel_roll->get_radio_trim());
     channel_pitch->set_radio_in(channel_pitch->get_radio_trim());
     channel_yaw->set_radio_in(channel_yaw->get_radio_trim());
@@ -836,7 +892,7 @@ void Sub::set_neutral_controls()
     channel_forward->set_radio_in(channel_forward->get_radio_trim());
     channel_lateral->set_radio_in(channel_lateral->get_radio_trim());
 
-    // Clear pitch/roll trim settings
+    // 清除姿态微调，防止上次会话的偏置残留。
     pitchTrim = 0;
     rollTrim  = 0;
 }
@@ -854,7 +910,9 @@ bool Sub::jsbutton_function_is_assigned(JSButton::button_function_t function)
     bool shift_is_assigned = false;
     bool function_is_assigned_to_shift = false;
     const uint8_t num_buttons = 32;
-    // Check all 32 buttons for the specified function
+    // 扫描全部 32 个按钮，检查目标功能是否可被触发：
+    // - 直接层匹配：立即返回 true
+    // - shift 层匹配：只有系统中存在 shift 按钮时才算有效
     for (uint8_t i = 0; i < num_buttons; i++) {
         JSButton* current_button = get_button(i);
         if (current_button == nullptr) {

@@ -1,8 +1,12 @@
+// mode.cpp - 飞行模式基础设施
+// 包含：模式对象构造、模式切换逻辑、飞行模式枚举到对象指针的映射
+
 #include "Sub.h"
 
 /*
   constructor for Mode object
  */
+// Mode 构造函数：初始化所有便捷引用，避免子类每次都写 sub.xxx
 Mode::Mode(void) :
     g(sub.g),
     g2(sub.g2),
@@ -19,7 +23,8 @@ Mode::Mode(void) :
     G_Dt(sub.G_Dt)
 { };
 
-// return the static controller object corresponding to supplied mode
+// mode_from_mode_num - 根据模式编号返回对应的模式对象指针
+// 如果编号无效则返回 nullptr（触发"没有此模式"通知）
 Mode *Sub::mode_from_mode_num(const Mode::Number mode)
 {
     Mode *ret = nullptr;
@@ -66,14 +71,14 @@ Mode *Sub::mode_from_mode_num(const Mode::Number mode)
 }
 
 
-// set_mode - change flight mode and perform any necessary initialisation
-// optional force parameter used to force the flight mode change (used only first time mode is set)
-// returns true if mode was successfully set
-// Some modes can always be set successfully but the return state of other flight modes should be checked and the caller should deal with failures appropriately
+// set_mode - 切换飞行模式并执行必要的初始化
+// force 参数用于强制首次设置模式
+// 返回 true 表示切换成功，调用者应处理切换失败的情况
+// 某些模式切换条件：需要 GPS 定位或有效高度估计
 bool Sub::set_mode(Mode::Number mode, ModeReason reason)
 {
 
-    // return immediately if we are already in the desired mode
+    // 如果已经在目标模式则直接更新原因并返回
     if (mode == control_mode) {
         control_mode_reason = reason;
         return true;

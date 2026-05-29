@@ -1,28 +1,25 @@
+// mode_surftrak.cpp - 海底距离跟踪模式（Surface Tracking）
+// 基于 ALT_HOLD 的变种，使用测距仪（声纳）保持与海底的固定距离
+//
+// 工作原理：
+//   1. 初始状态为"重置"（rangefinder_target_cm < 0）
+//   2. 当满足以下条件时退出重置状态：
+//      - 测距仪读数有效（健康、在量程内等）
+//      - 潜器深度超过 SURFTRAK_DEPTH 参数
+//   3. 正常工作时，将地形偏移目标设为当前测距仪读数，由 AC_PosControl 控制深度
+//
+// 设计原则：
+//   - 测距仪故障时不重置目标（避免因故障导致目标跳变）
+//   - 飞手手动控制深度时，同步调整测距仪目标（减少"弹回"效应）
+//   - 测距仪响应比气压计慢，深度变化由气压计实时跟踪，测距仪用于微调
+
 #include "Sub.h"
 
-/*
- * SURFTRAK (surface tracking) -- a variation on ALT_HOLD (depth hold)
- *
- * SURFTRAK starts in the "reset" state (rangefinder_target_cm < 0). SURFTRAK exits the reset state when these
- * conditions are met:
- * -- There is a good rangefinder reading (the rangefinder is healthy, the reading is between min and max, etc.)
- * -- The sub is below SURFTRAK_DEPTH
- *
- * During normal operation, SURFTRAK sets the offset target to the current terrain altitude estimate and calls
- * AC_PosControl to do the rest.
- *
- * We generally do not want to reset SURFTRAK if the rangefinder glitches, since that will result in a new rangefinder
- * target. E.g., if a pilot is running 1m above the seafloor, there is a glitch, and the next rangefinder reading shows
- * 1.1m, the desired behavior is to move 10cm closer to the seafloor, vs setting a new target of 1.1m above the
- * seafloor.
- *
- * If the pilot takes control, SURFTRAK uses the change in depth readings to adjust the rangefinder target. This
- * minimizes the "bounce back" that can happen as the slower rangefinder catches up to the quicker barometer.
- */
-
+// INVALID_TARGET 表示测距仪目标尚未建立
 #define INVALID_TARGET (-1)
 #define HAS_VALID_TARGET (rangefinder_target_cm > 0)
 
+// 构造函数：初始化测距仪目标为无效值
 ModeSurftrak::ModeSurftrak() :
         rangefinder_target_cm(INVALID_TARGET),
         pilot_in_control(false),
@@ -31,12 +28,14 @@ ModeSurftrak::ModeSurftrak() :
 
 bool ModeSurftrak::init(bool ignore_checks)
 {
+    // 先调用 ALT_HOLD 初始化（需要深度传感器）
     if (!ModeAlthold::init(ignore_checks)) {
         return false;
     }
 
-    reset();
+    reset(); // 清除旧的测距仪目标
 
+    // 提示用户当前状态
     if (!sub.rangefinder_alt_ok()) {
         sub.gcs().send_text(MAV_SEVERITY_INFO, "waiting for a rangefinder reading");
 #if AP_RANGEFINDER_ENABLED
@@ -50,26 +49,28 @@ bool ModeSurftrak::init(bool ignore_checks)
 
 void ModeSurftrak::run()
 {
-    run_pre();
+    run_pre(); // 姿态控制（继承自 ALT_HOLD）
 
     if (!motors.armed()) {
-        // Forget rangefinder target
+        // 未解锁时清除测距仪目标，防止重新解锁后使用过期目标
         reset();
     } else {
-        control_range();
+        control_range(); // 海底距离控制
     }
 
-    run_post();
+    run_post(); // 输出（继承自 ALT_HOLD）
 }
 
 /*
- * Set the rangefinder target, return true if successful. This may be called from scripting so run a few extra checks.
+ * set_rangefinder_target_cm - 设置测距仪目标距离（可由脚本调用）
+ * 返回 true 表示设置成功
  */
 bool ModeSurftrak::set_rangefinder_target_cm(float target_cm)
 {
     bool success = false;
 
 #if AP_RANGEFINDER_ENABLED
+    // 安全检查：模式、深度、量程范围
     if (sub.control_mode != Number::SURFTRAK) {
         sub.gcs().send_text(MAV_SEVERITY_WARNING, "wrong mode, rangefinder target not set");
     } else if (position_control->get_pos_estimate_U_m() * 100.0f >= sub.g.surftrak_depth) {

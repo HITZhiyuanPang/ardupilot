@@ -1,21 +1,28 @@
+// Attitude.cpp - 姿态辅助计算函数
+// 包含：
+//   - get_pilot_desired_lean_angles：将摇杆输入转换为期望倾斜角
+//   - get_pilot_desired_yaw_rate：将摇杆偏航输入转换为期望偏航角速率
+//   - check_ekf_yaw_reset：检测 EKF 偏航重置并同步姿态控制器
+//   - get_pilot_desired_angle_rates：特技模式的角速率转换
+
 #include "Sub.h"
 
-// get_pilot_desired_angle - transform pilot's roll or pitch input into a desired lean angle
-// returns desired angle in centi-degrees
+// get_pilot_desired_lean_angles - 将飞手摇杆输入转换为期望倾斜角（centi-degrees）
+// 包含：最大角度限制、圆形限制（防止斜向超标）、横向倾斜到欧拉滚转的转换
 void Sub::get_pilot_desired_lean_angles(float roll_in, float pitch_in, float &roll_out, float &pitch_out, float angle_max)
 {
-    // sanity check angle max parameter
+    // 获取姿态控制器允许的最大倾斜角
     const float angle_max_cd = attitude_control.lean_angle_max_cd();
 
-    // limit max lean angle
+    // 限制最大倾斜角在 [10°, ATC_ANGLE_MAX] 范围内
     angle_max = constrain_float(angle_max, 1000, angle_max_cd);
 
-    // scale roll_in, pitch_in to ATC_ANGLE_MAX parameter range
+    // 将 roll_in/pitch_in（-4500~4500）缩放到 angle_max 范围
     float scaler = angle_max_cd/(float)ROLL_PITCH_INPUT_MAX;
     roll_in *= scaler;
     pitch_in *= scaler;
 
-    // do circular limit
+    // 圆形限制：斜向输入时按比例缩减，防止合成角度超过最大值
     float total_in = norm(pitch_in, roll_in);
     if (total_in > angle_max) {
         float ratio = angle_max / total_in;
@@ -23,24 +30,24 @@ void Sub::get_pilot_desired_lean_angles(float roll_in, float pitch_in, float &ro
         pitch_in *= ratio;
     }
 
-    // do lateral tilt to euler roll conversion
+    // 横向倾斜到欧拉滚转转换（考虑俯仰角影响的真实滚转角）
     roll_in = (18000/M_PI) * atanf(cosf(pitch_in*(M_PI/18000))*tanf(roll_in*(M_PI/18000)));
 
-    // return
+    // 返回结果
     roll_out = roll_in;
     pitch_out = pitch_in;
 }
 
-// get_pilot_desired_heading - transform pilot's yaw input into a
-// desired yaw rate
-// returns desired yaw rate in centi-degrees per second
+// get_pilot_desired_yaw_rate - 将摇杆偏航输入转换为期望偏航角速率（centi-degrees/s）
 float Sub::get_pilot_desired_yaw_rate(int16_t stick_angle) const
 {
-    // convert pilot input to the desired yaw rate
+    // 偏航角速率 = 摇杆输入 * ACRO_YAW_P 参数
     return stick_angle * g.acro_yaw_p;
 }
 
-// check for ekf yaw reset and adjust target heading
+// check_ekf_yaw_reset - 检测 EKF 偏航角重置并同步姿态控制器
+// EKF 在检测到磁力计/GPS 约束更新时可能会重置偏航角估计
+// 此时需要通知姿态控制器更新惯性坐标系参考
 void Sub::check_ekf_yaw_reset()
 {
     float yaw_angle_change_rad;

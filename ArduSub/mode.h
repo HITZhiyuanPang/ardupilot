@@ -1,3 +1,17 @@
+// mode.h - ArduSub 飞行模式基类及枚举定义
+// ArduSub 支持的飞行模式：
+//   MANUAL(19)    - 直通模式：飞手输入直接驱动推进器，无任何稳定控制
+//   STABILIZE(0)  - 稳定模式：自动稳定横滚/俯仰，飞手控制偏航和深度
+//   ACRO(1)       - 特技模式：飞手控制角速率，无自动水平恢复
+//   ALT_HOLD(2)   - 深度保持：自动维持当前深度，飞手控制水平方向
+//   AUTO(3)       - 全自动任务：按航点执行预设任务
+//   GUIDED(4)     - 引导模式：接受 GCS 实时坐标/速度指令
+//   CIRCLE(7)     - 圆形航迹：自动绕圆飞行
+//   SURFACE(9)    - 自动上浮：返回水面
+//   POSHOLD(16)   - 位置保持：GPS 悬停，飞手可临时覆盖
+//   MOTOR_DETECT(20) - 电机方向检测：自动识别推进器安装方向
+//   SURFTRAK(21)  - 海底跟踪：保持与海底固定距离
+
 #pragma once
 
 #include "Sub.h"
@@ -39,19 +53,20 @@ class Mode
 public:
 
     // Auto Pilot Modes enumeration
+    // 飞行模式枚举：数字与 MAVLink 和地面站显示保持一致
     enum class Number : uint8_t {
-        STABILIZE =     0,  // manual angle with manual depth/throttle
-        ACRO =          1,  // manual body-frame angular rate with manual depth/throttle
-        ALT_HOLD =      2,  // manual angle with automatic depth/throttle
-        AUTO =          3,  // fully automatic waypoint control using mission commands
-        GUIDED =        4,  // fully automatic fly to coordinate or fly at velocity/direction using GCS immediate commands
-        CIRCLE =        7,  // automatic circular flight with automatic throttle
-        SURFACE =       9,  // automatically return to surface, pilot maintains horizontal control
-        POSHOLD =      16,  // automatic position hold with manual override, with automatic throttle
-        MANUAL =       19,  // Pass-through input with no stabilization
-        MOTOR_DETECT = 20,  // Automatically detect motors orientation
-        SURFTRAK =     21   // Track distance above seafloor (hold range)
-        // Mode number 30 reserved for "offboard" for external/lua control.
+        STABILIZE =     0,  // 稳定模式：手动横滚/俯仰角度 + 手动深度/油门
+        ACRO =          1,  // 特技模式：手动机体坐标角速率 + 手动深度/油门
+        ALT_HOLD =      2,  // 深度保持模式：手动角度 + 自动深度/油门
+        AUTO =          3,  // 全自动航点任务
+        GUIDED =        4,  // 引导模式：GCS 实时发送坐标或速度指令
+        CIRCLE =        7,  // 圆形航迹模式：自动圆形飞行 + 自动油门
+        SURFACE =       9,  // 自动上浮：保持水平位置不动，垂直返回水面
+        POSHOLD =      16,  // 位置保持：GPS 悬停 + 手动覆盖 + 自动油门
+        MANUAL =       19,  // 直通模式：无任何稳定，飞手完全控制
+        MOTOR_DETECT = 20,  // 电机方向检测：自动检测推进器安装朝向
+        SURFTRAK =     21   // 海底距离跟踪：保持与海底固定高度
+        // 模式编号 30 保留给外部/Lua 脚本控制
     };
 
     // constructor
@@ -60,18 +75,18 @@ public:
     // do not allow copying
     CLASS_NO_COPY(Mode);
 
-    // child classes should override these methods
-    virtual bool init(bool ignore_checks) { return true; }
-    virtual void run() = 0;
-    virtual bool requires_GPS() const = 0;
-    virtual bool requires_altitude() const = 0;
-    virtual bool allows_arming(bool from_gcs) const = 0;
-    virtual bool is_autopilot() const { return false; }
-    virtual bool in_guided_mode() const { return false; }
+    // 子类需要重写的核心虚函数
+    virtual bool init(bool ignore_checks) { return true; } // 进入模式时的初始化
+    virtual void run() = 0;                                // 每个控制周期调用（纯虚）
+    virtual bool requires_GPS() const = 0;                 // 是否需要 GPS 定位
+    virtual bool requires_altitude() const = 0;            // 是否需要高度估计（气压计/EKF）
+    virtual bool allows_arming(bool from_gcs) const = 0;   // 是否允许在此模式下解锁
+    virtual bool is_autopilot() const { return false; }    // 是否为全自动驾驶模式
+    virtual bool in_guided_mode() const { return false; }  // 是否接受 GCS 引导指令
 
     // return a string for this flightmode
-    virtual const char *name() const = 0;
-    virtual const char *name4() const = 0;
+    virtual const char *name() const = 0;    // 模式名称（用于 GCS 显示）
+    virtual const char *name4() const = 0;   // 4字符缩写
 
     // returns a unique number specific to this mode
     virtual Mode::Number number() const = 0;

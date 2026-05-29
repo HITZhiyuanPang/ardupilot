@@ -1,48 +1,40 @@
+// mode_motordetect.cpp - 电机方向检测模式
+// 自动检测每个推进器的安装方向是否需要反转
+// 前提：用户已选择正确的机架类型，且电机已连接到正确的 ESC
+//
+// 检测流程（每个电机）：
+//   1. 等待潜器停止运动（>500ms 静止）
+//   2. 以正向推力运行 500ms
+//   3. 如果 IMU 反馈符合预期方向：保存方向，检测下一个电机
+//   4. 否则：再等待静止，以反向推力运行 500ms
+//   5. 如果反向结果正确：保存反向标志
+//   6. 如果两个方向都不对：中止检测
+
 #include "Sub.h"
 #include "stdio.h"
 
-/*
- * control_motordetect.cpp - init and run calls for motordetect flightmode;
- *
- *  This mode pulses all thrusters to detect if they need to be reversed.
- *  This still requires that the user has the correct frame selected and the motors
- *  are connected to the correct ESCs.
- *
- *  For each motor:
- *      wait until vehicle is stopped for > 500ms
- *      apply throttle up for 500ms
- *      If results are good:
- *          save direction and try the next motor.
- *      else
- *          wait until vehicle is stopped for > 500ms
- *          apply throttle down for 500ms
- *          If results are good
- *              save direction and try the next motor.
- *          If results are bad
- *              Abort!
- */
-
 namespace {
 
-    // controller states
+    // 检测状态机枚举
     enum test_state {
-        STANDBY,
-        SETTLING,
-        THRUSTING,
-        DETECTING,
-        DONE
+        STANDBY,    // 等待开始
+        SETTLING,   // 等待潜器静止
+        THRUSTING,  // 正在施加推力
+        DETECTING,  // 分析 IMU 数据判断方向
+        DONE        // 当前电机检测完成
     };
 
+    // 推力方向枚举
     enum direction {
-        UP = 1,
-        DOWN = -1
+        UP = 1,     // 正向推力
+        DOWN = -1   // 反向推力
     };
 
-    static uint32_t settling_timer;
-    static uint32_t thrusting_timer;
-    static uint8_t md_state;
-    static uint8_t current_motor;
-    static int16_t current_direction;
+    static uint32_t settling_timer;      // 静止等待计时器
+    static uint32_t thrusting_timer;     // 推力持续计时器
+    static uint8_t md_state;             // 当前检测状态机状态
+    static uint8_t current_motor;        // 当前正在检测的电机索引
+    static int16_t current_direction;    // 当前测试方向（+1 正向，-1 反向）
 }
 
 bool ModeMotordetect::init(bool ignore_checks)
@@ -55,7 +47,7 @@ bool ModeMotordetect::init(bool ignore_checks)
 
 void ModeMotordetect::run()
 {
-    // if not armed set throttle to zero and exit immediately
+    // 未解锁：停止电机，等待解锁
     if (!motors.armed()) {
         motors.set_desired_spool_state(AP_Motors::DesiredSpoolState::GROUND_IDLE);
         // Force all motors to stop

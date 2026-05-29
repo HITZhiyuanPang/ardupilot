@@ -1,60 +1,72 @@
+// mode_guided.cpp - 引导模式（Guided Mode）
+// 由外部计算机（如地面站、机载计算机）通过 MAVLink 实时控制潜器
+// 支持三种子模式：
+//   1. 位置控制（SET_POSITION_TARGET_GLOBAL_INT）
+//   2. 位置+速度控制（posvel 模式）
+//   3. 姿态控制（SET_ATTITUDE_TARGET）
+// 各子模式均有超时机制，超时后保持上一状态
+
 #include "Sub.h"
 
 /*
- * Init and run calls for guided flight mode
+ * 引导模式初始化和运行函数
  */
 
-#define GUIDED_POSVEL_TIMEOUT_MS    3000    // guided mode's position-velocity controller times out after 3seconds with no new updates
-#define GUIDED_ATTITUDE_TIMEOUT_MS  1000    // guided mode's attitude controller times out after 1 second with no new updates
+// 位置-速度控制模式超时：3 秒内无更新则停止
+#define GUIDED_POSVEL_TIMEOUT_MS    3000
+// 姿态控制模式超时：1 秒内无更新则保持当前姿态
+#define GUIDED_ATTITUDE_TIMEOUT_MS  1000
 
-static Vector3p posvel_pos_target_cm;
-static Vector3f posvel_vel_target_cms;
-static uint32_t update_time_ms;
+static Vector3p posvel_pos_target_cm;     // 位置-速度子模式：目标位置（cm，相对 EKF 原点）
+static Vector3f posvel_vel_target_cms;    // 位置-速度子模式：目标速度（cm/s，NED 坐标系）
+static uint32_t update_time_ms;           // 上次收到外部目标更新的时间戳
 
+// 引导姿态子模式状态
 struct {
-    uint32_t update_time_ms;
-    float roll_cd;
-    float pitch_cd;
-    float yaw_cd;
-    float climb_rate_cms;
+    uint32_t update_time_ms;   // 上次更新时间
+    float roll_cd;             // 目标滚转角（centi-degrees）
+    float pitch_cd;            // 目标俯仰角（centi-degrees）
+    float yaw_cd;              // 目标偏航角（centi-degrees）
+    float climb_rate_cms;      // 目标爬升速率（cm/s）
 } static guided_angle_state = {0,0.0f, 0.0f, 0.0f, 0.0f};
 
+// 引导模式边界限制（防止外部命令超出安全范围）
 struct Guided_Limit {
-    uint32_t timeout_ms;  // timeout (in seconds) from the time that guided is invoked
-    float alt_min_cm;   // lower altitude limit in cm above home (0 = no limit)
-    float alt_max_cm;   // upper altitude limit in cm above home (0 = no limit)
-    float horiz_max_cm; // horizontal position limit in cm from where guided mode was initiated (0 = no limit)
-    uint32_t start_time_ms;// system time in milliseconds that control was handed to the external computer
-    Vector3f start_pos_neu_cm; // start position as a distance from home in cm.  used for checking horiz_max limit
+    uint32_t timeout_ms;       // 引导模式最长持续时间（ms）
+    float alt_min_cm;          // 最低高度（cm，相对 home，0=不限）
+    float alt_max_cm;          // 最高高度（cm，相对 home，0=不限）
+    float horiz_max_cm;        // 水平最大偏移（cm，从进入引导模式的位置算起，0=不限）
+    uint32_t start_time_ms;    // 进入引导模式的系统时间
+    Vector3f start_pos_neu_cm; // 进入引导模式时的初始位置（相对 home，cm）
 } guided_limit;
 
-// guided_init - initialise guided controller
+// guided_init - 初始化引导控制器
 bool ModeGuided::init(bool ignore_checks)
 {
     if (!sub.position_ok() && !ignore_checks) {
         return false;
     }
 
-    // start in position control mode
+    // 默认启动为位置控制子模式
     guided_pos_control_start();
     return true;
 }
 
-// get_default_auto_yaw_mode - returns auto_yaw_mode based on WP_YAW_BEHAVIOR parameter
-// set rtl parameter to true if this is during an RTL
+// get_default_auto_yaw_mode - 根据 WP_YAW_BEHAVIOR 参数返回自动偏航模式
+// rtl=true 表示 RTL 过程中
 autopilot_yaw_mode ModeGuided::get_default_auto_yaw_mode(bool rtl) const
 {
     switch (g.wp_yaw_behavior) {
 
     case WP_YAW_BEHAVIOR_NONE:
-        return AUTO_YAW_HOLD;
+        return AUTO_YAW_HOLD;   // 保持当前偏航
         break;
 
     case WP_YAW_BEHAVIOR_LOOK_AT_NEXT_WP_EXCEPT_RTL:
         if (rtl) {
-            return AUTO_YAW_HOLD;
+            return AUTO_YAW_HOLD;            // RTL 时保持偏航
         } else {
-            return AUTO_YAW_LOOK_AT_NEXT_WP;
+            return AUTO_YAW_LOOK_AT_NEXT_WP; // 飞向下一航点时朝向下一航点
         }
         break;
 

@@ -5,13 +5,23 @@
 #include <AP_RangeFinder/AP_RangeFinder.h>
 #include <AP_RangeFinder/AP_RangeFinder_Backend.h>
 
+// GCS_MAVLink_Sub.cpp - ArduSub 与地面站(MAVLink)通信适配层
+// 主要职责：
+//  1) 下行：向地面站发送状态/导航/调参/水深等遥测
+//  2) 上行：接收地面站控制指令并转发到 Sub 各控制模块
+//  3) 命令分发：处理 COMMAND_INT、手动控制、位置/姿态目标等消息
+
 MAV_TYPE GCS_Sub::frame_type() const
 {
+    // 声明机体类型为潜航器，供地面站识别与界面适配
     return MAV_TYPE_SUBMARINE;
 }
 
+// base_mode 是 MAVLink 通用模式位掩码，主要给“通用地面站”做兼容显示。
+// 对 ArduSub 来说，真正有精确定义的是 custom_mode（即 ArduSub 自己的模式编号）。
 uint8_t GCS_MAVLINK_Sub::base_mode() const
 {
+    // 组装 MAVLink 标准 base_mode 位掩码（兼容通用地面站）
     uint8_t _base_mode = MAV_MODE_FLAG_STABILIZE_ENABLED;
 
     // work out the base_mode. This value is not very useful
@@ -52,11 +62,15 @@ uint8_t GCS_MAVLINK_Sub::base_mode() const
 
 uint32_t GCS_Sub::custom_mode() const
 {
+    // ArduSub 的真实模式语义通过 custom_mode 传递
     return (uint32_t)sub.control_mode;
 }
 
+// system_status 是地面站状态灯/状态字的重要来源。
+// 这里把 Sub 内部状态压缩成 MAVLink 标准枚举，便于 QGC 或其他 GCS 统一显示。
 MAV_STATE GCS_MAVLINK_Sub::vehicle_system_status() const
 {
+    // 向地面站报告系统状态优先级：failsafe > armed > boot > standby
     // set system as critical if any failsafe have triggered
     if (sub.any_failsafe_triggered())  {
         return MAV_STATE_CRITICAL;
@@ -74,12 +88,16 @@ MAV_STATE GCS_MAVLINK_Sub::vehicle_system_status() const
 
 void GCS_MAVLINK_Sub::send_banner()
 {
+    // 启动横幅 + 当前机架类型字符串
     GCS_MAVLINK::send_banner();
     send_text(MAV_SEVERITY_INFO, "Frame: %s", sub.motors.get_frame_string());
 }
 
+// 这个消息给地面站展示“导航控制器当前在追什么目标”。
+// 其中姿态目标来自 attitude_control，航向/距离来自 wp_nav，垂向误差来自 pos_control。
 void GCS_MAVLINK_Sub::send_nav_controller_output() const
 {
+    // 发送导航控制输出（目标姿态、航点方位/距离、垂向误差）
     const Vector3f &targets = sub.attitude_control.get_att_target_euler_cd();
     mavlink_msg_nav_controller_output_send(
         chan,
@@ -97,20 +115,24 @@ void GCS_MAVLINK_Sub::send_nav_controller_output() const
 // would head in an autonomous mode
 bool GCS_MAVLINK_Sub::get_target_location(Location &loc) const
 {
+    // 仅在 wp_nav 激活时返回当前目标点
     return sub.wp_nav.is_active() && sub.wp_nav.get_wp_destination_loc(loc);
 }
 
 int16_t GCS_MAVLINK_Sub::vfr_hud_throttle() const
 {
+    // HUD 油门按百分比上报
     return (int16_t)(sub.motors.get_throttle() * 100);
 }
 
 float GCS_MAVLINK_Sub::vfr_hud_alt() const
 {
+    // HUD 高度使用海平面高度(MSL)
     return sub.get_alt_msl();
 }
 
-// Work around to get temperature sensor data out
+// 借用 scaled_pressure3 消息通道把温度传感器数据送出去。
+// 如果没有温度数据，就退回基类的标准实现。
 void GCS_MAVLINK_Sub::send_scaled_pressure3()
 {
 #if AP_TEMPERATURE_SENSOR_ENABLED
@@ -135,6 +157,7 @@ void GCS_MAVLINK_Sub::send_scaled_pressure3()
 
 bool GCS_MAVLINK_Sub::send_info()
 {
+    // 以 NAMED_VALUE_FLOAT 打包发送 Sub 特有状态（云台/灯光/系绳等）
     // Just do this all at once, hopefully the hard-wire telemetry requirement means this is ok
     // Name is char[10]
     CHECK_PAYLOAD_SIZE(NAMED_VALUE_FLOAT);
@@ -173,8 +196,11 @@ bool GCS_MAVLINK_Sub::send_info()
 }
 
 #if AP_RANGEFINDER_ENABLED
+// 水深消息不是所有测距仪都能发，必须是朝下安装的测距仪。
+// 这里每个循环只发一条 WATER_DEPTH，避免链路被大消息持续占满。
 void GCS_MAVLINK_Sub::send_water_depth()
 {
+    // 发送 WATER_DEPTH：仅支持“朝下”测距传感器（ROTATION_PITCH_270）
     if (!HAVE_PAYLOAD_SPACE(chan, WATER_DEPTH)) {
         return;
     }
@@ -234,11 +260,11 @@ void GCS_MAVLINK_Sub::send_water_depth()
 }
 #endif  // AP_RANGEFINDER_ENABLED
 
-/*
-  send PID tuning message
- */
+// 向地面站发送 PID 调参数据。
+// 哪些轴要发由 g.gcs_pid_mask 控制，避免无意义地占用带宽。
 void GCS_MAVLINK_Sub::send_pid_tuning()
 {
+    // 根据 gcs_pid_mask 选择性发送 PID_TUNING（roll/pitch/yaw/accz）
     const Parameters &g = sub.g;
     AP_AHRS &ahrs = AP::ahrs();
     AC_AttitudeControl_Sub &attitude_control = sub.attitude_control;
@@ -307,12 +333,14 @@ void GCS_MAVLINK_Sub::send_pid_tuning()
 }
 
 bool GCS_Sub::vehicle_initialised() const {
+    // 供 GCS 查询系统初始化完成状态
     return sub.ap.initialised;
 }
 
 // try to send a message, return false if it won't fit in the serial tx buffer
 bool GCS_MAVLINK_Sub::try_send_message(enum ap_message id)
 {
+    // 发送调度入口：Sub 自定义消息优先，其余回退到基类
     switch (id) {
 
     case MSG_NAMED_FLOAT:
@@ -338,11 +366,14 @@ bool GCS_MAVLINK_Sub::try_send_message(enum ap_message id)
 
 bool GCS_MAVLINK_Sub::handle_guided_request(AP_Mission::Mission_Command &cmd)
 {
+    // Guided 任务请求交由 Sub 核心处理
     return sub.do_guided(cmd);
 }
 
+// 预飞气压计标定：为避免运行中重置基准，要求潜航器处于未解锁状态。
 MAV_RESULT GCS_MAVLINK_Sub::_handle_command_preflight_calibration_baro(const mavlink_message_t &msg)
 {
+    // 气压计校准要求未解锁，避免运行中重标定
     if (sub.motors.armed()) {
         gcs().send_text(MAV_SEVERITY_INFO, "Disarm before calibration.");
         return MAV_RESULT_FAILED;
@@ -370,6 +401,7 @@ MAV_RESULT GCS_MAVLINK_Sub::_handle_command_preflight_calibration(const mavlink_
 
 MAV_RESULT GCS_MAVLINK_Sub::handle_command_do_set_roi(const Location &roi_loc)
 {
+    // ROI 的本质是“摄像头/机体朝向某个感兴趣目标点”
     if (!roi_loc.check_latlng()) {
         return MAV_RESULT_FAILED;
     }
@@ -379,6 +411,7 @@ MAV_RESULT GCS_MAVLINK_Sub::handle_command_do_set_roi(const Location &roi_loc)
 
 MAV_RESULT GCS_MAVLINK_Sub::handle_command_int_do_reposition(const mavlink_command_int_t &packet)
 {
+    // DO_REPOSITION：可选切到 GUIDED 并设置新目标点
     const bool change_modes = ((int32_t)packet.param2 & MAV_DO_REPOSITION_FLAGS_CHANGE_MODE) == MAV_DO_REPOSITION_FLAGS_CHANGE_MODE;
     if (!sub.flightmode->in_guided_mode() && !change_modes) {
         return MAV_RESULT_DENIED;
@@ -399,7 +432,8 @@ MAV_RESULT GCS_MAVLINK_Sub::handle_command_int_do_reposition(const mavlink_comma
         return MAV_RESULT_DENIED; // failed as the location is not valid
     }
 
-    // we need to do this first, as we don't want to change the flight mode unless we can also set the target
+    // 先尝试写入目标点，再切模式。
+    // 这样可以避免“模式切过去了，但目标点无效”的半完成状态。
     if (!sub.mode_guided.guided_set_destination(request_location)) {
         return MAV_RESULT_FAILED;
     }
@@ -419,6 +453,7 @@ MAV_RESULT GCS_MAVLINK_Sub::handle_command_int_do_reposition(const mavlink_comma
 
 MAV_RESULT GCS_MAVLINK_Sub::handle_command_int_packet(const mavlink_command_int_t &packet, const mavlink_message_t &msg)
 {
+    // COMMAND_INT 分发：将常用任务/航向/速度/电机测试命令映射到对应处理器
     switch(packet.command) {
 
     case MAV_CMD_CONDITION_YAW:
@@ -453,6 +488,7 @@ MAV_RESULT GCS_MAVLINK_Sub::handle_command_int_packet(const mavlink_command_int_
 
 MAV_RESULT GCS_MAVLINK_Sub::handle_MAV_CMD_NAV_LOITER_UNLIM(const mavlink_command_int_t &packet)
 {
+    // Sub 中用 POSHOLD 对应“无限悬停”语义
         if (!sub.set_mode(Mode::Number::POSHOLD, ModeReason::GCS_COMMAND)) {
             return MAV_RESULT_FAILED;
         }
@@ -461,6 +497,7 @@ MAV_RESULT GCS_MAVLINK_Sub::handle_MAV_CMD_NAV_LOITER_UNLIM(const mavlink_comman
 
 MAV_RESULT GCS_MAVLINK_Sub::handle_MAV_CMD_NAV_LAND(const mavlink_command_int_t &packet)
 {
+    // Sub 的 LAND 语义映射到 SURFACE（上浮到水面）
         if (!sub.set_mode(Mode::Number::SURFACE, ModeReason::GCS_COMMAND)) {
             return MAV_RESULT_FAILED;
         }
@@ -469,6 +506,8 @@ MAV_RESULT GCS_MAVLINK_Sub::handle_MAV_CMD_NAV_LAND(const mavlink_command_int_t 
 
 MAV_RESULT GCS_MAVLINK_Sub::handle_MAV_CMD_CONDITION_YAW(const mavlink_command_int_t &packet)
 {
+    // 在任务/引导场景中修改期望朝向。
+    // param4=1 表示相对当前朝向偏移，param4=0 表示绝对航向角。
         // param1 : target angle [0-360]
         // param2 : speed during change [deg per second]
         // param3 : direction (-1:ccw, +1:cw)
@@ -484,6 +523,7 @@ MAV_RESULT GCS_MAVLINK_Sub::handle_MAV_CMD_CONDITION_YAW(const mavlink_command_i
 
 MAV_RESULT GCS_MAVLINK_Sub::handle_MAV_CMD_DO_CHANGE_SPEED(const mavlink_command_int_t &packet)
 {
+    // 仅接受正速度；AIRSPEED 在 Sub 中按地速兼容处理
     if (!is_positive(packet.param2)) {
         // Target speed must be larger than zero
         return MAV_RESULT_DENIED;
@@ -506,6 +546,7 @@ MAV_RESULT GCS_MAVLINK_Sub::handle_MAV_CMD_DO_CHANGE_SPEED(const mavlink_command
 
 MAV_RESULT GCS_MAVLINK_Sub::handle_MAV_CMD_MISSION_START(const mavlink_command_int_t &packet)
 {
+    // 已解锁时允许切 AUTO 并启动任务
         if (sub.motors.armed() && sub.set_mode(Mode::Number::AUTO, ModeReason::GCS_COMMAND)) {
             return MAV_RESULT_ACCEPTED;
         }
@@ -529,6 +570,7 @@ MAV_RESULT GCS_MAVLINK_Sub::handle_MAV_CMD_DO_MOTOR_TEST(const mavlink_command_i
 // axes.
 void GCS_MAVLINK_Sub::handle_manual_control_axes(const mavlink_manual_control_t &packet, const uint32_t tnow)
 {
+    // 将 MANUAL_CONTROL 映射为 RC override 通道输入
         sub.transform_manual_control_to_rc_override(
             packet.x,
             packet.y,
@@ -552,6 +594,7 @@ void GCS_MAVLINK_Sub::handle_manual_control_axes(const mavlink_manual_control_t 
 
 void GCS_MAVLINK_Sub::handle_message(const mavlink_message_t &msg)
 {
+    // 消息总入口：处理 Sub 关心的 MAVLink 消息，其余回退基类
     switch (msg.msgid) {
 
     case MAVLINK_MSG_ID_RC_CHANNELS_OVERRIDE: {     // MAV ID: 70
@@ -562,6 +605,7 @@ void GCS_MAVLINK_Sub::handle_message(const mavlink_message_t &msg)
         sub.failsafe.last_pilot_input_ms = AP_HAL::millis();
         // a RC override message is considered to be a 'heartbeat'
         // from the ground station for failsafe purposes
+        // 也就是说：即使没收到独立 heartbeat，只要持续有 override，就认为地面站仍在线。
         
         handle_rc_channels_override(msg);
         break;
@@ -584,7 +628,8 @@ void GCS_MAVLINK_Sub::handle_message(const mavlink_message_t &msg)
             break;
         }
 
-        // convert thrust to climb rate
+        // 把 0~1 的 thrust 重新映射为“升沉速度”指令：
+        // 0.5 表示保持深度，>0.5 上升，<0.5 下潜。
         packet.thrust = constrain_float(packet.thrust, 0.0f, 1.0f);
         float climb_rate_cms = 0.0f;
         if (is_equal(packet.thrust, 0.5f)) {
@@ -625,7 +670,8 @@ void GCS_MAVLINK_Sub::handle_message(const mavlink_message_t &msg)
         bool yaw_ignore      = packet.type_mask & MAVLINK_SET_POS_TYPE_MASK_YAW_IGNORE;
         bool yaw_rate_ignore = packet.type_mask & MAVLINK_SET_POS_TYPE_MASK_YAW_RATE_IGNORE;
 
-        // prepare position
+        // prepare position: 按坐标系做单位换算、机体系旋转、offset 补偿
+        // MAVLink 本地目标以米为单位，这里统一转换成 ArduPilot 内部常用的厘米。
         Vector3f pos_vector;
         if (!pos_ignore) {
             // convert to cm
@@ -647,7 +693,7 @@ void GCS_MAVLINK_Sub::handle_message(const mavlink_message_t &msg)
             }
         }
 
-        // prepare velocity
+        // prepare velocity: 同样处理机体系到 NE 旋转
         Vector3f vel_vector;
         if (!vel_ignore) {
             // convert to cm
@@ -658,7 +704,7 @@ void GCS_MAVLINK_Sub::handle_message(const mavlink_message_t &msg)
             }
         }
 
-        // prepare yaw
+        // prepare yaw: 转换到 centi-degree，区分相对/绝对偏航
         float yaw_cd =  0.0f;
         bool yaw_relative = false;
         float yaw_rate_cds = 0.0f;
@@ -670,7 +716,8 @@ void GCS_MAVLINK_Sub::handle_message(const mavlink_message_t &msg)
             yaw_rate_cds = degrees(packet.yaw_rate) * 100.0f;
         }
 
-        // send request
+        // send request: 仅支持 pos+vel、vel-only、pos-only（acc 需忽略）
+        // 这里并没有处理“加速度目标”控制，收到这类组合会被忽略。
         if (!pos_ignore && !vel_ignore && acc_ignore) {
             sub.mode_guided.guided_set_destination_posvel(pos_vector, vel_vector, !yaw_ignore, yaw_cd, !yaw_rate_ignore, yaw_rate_cds, yaw_relative);
         } else if (pos_ignore && !vel_ignore && acc_ignore) {
@@ -706,12 +753,12 @@ void GCS_MAVLINK_Sub::handle_message(const mavlink_message_t &msg)
          * bool yaw_rate_ignore = packet.type_mask & MAVLINK_SET_POS_TYPE_MASK_YAW_RATE_IGNORE;
          */
 
-        if (!z_ignore && sub.control_mode == Mode::Number::ALT_HOLD) { // Control only target depth when in ALT_HOLD
+        if (!z_ignore && sub.control_mode == Mode::Number::ALT_HOLD) { // ALT_HOLD 下仅接管目标深度
             sub.pos_control.set_pos_desired_U_cm(packet.alt*100);
             break;
         }
 
-        Vector3f pos_neu_cm;  // position (North, East, Up coordinates) in centimeters
+        Vector3f pos_neu_cm;  // NEU 坐标（厘米）
 
         if (!pos_ignore) {
             // sanity check location
@@ -745,7 +792,7 @@ void GCS_MAVLINK_Sub::handle_message(const mavlink_message_t &msg)
         break;
     }
 
-    // Remote leak sensor support (e.g. in a separate enclosure), via MAVLink status messages.
+    // 远端漏水传感器支持：例如独立舱体通过 MAVLink SYS_STATUS 上报漏水状态。
     case MAVLINK_MSG_ID_SYS_STATUS: {
         mavlink_sys_status_t packet;
         mavlink_msg_sys_status_decode(&msg, &packet);
@@ -766,6 +813,7 @@ void GCS_MAVLINK_Sub::handle_message(const mavlink_message_t &msg)
 
 uint64_t GCS_MAVLINK_Sub::capabilities() const
 {
+    // 向地面站声明能力位：任务协议、位置/姿态目标、终止等
     return (MAV_PROTOCOL_CAPABILITY_MISSION_FLOAT |
             MAV_PROTOCOL_CAPABILITY_MISSION_INT |
             MAV_PROTOCOL_CAPABILITY_SET_POSITION_TARGET_LOCAL_NED |
@@ -781,6 +829,7 @@ uint64_t GCS_MAVLINK_Sub::capabilities() const
 
 MAV_RESULT GCS_MAVLINK_Sub::handle_flight_termination(const mavlink_command_int_t &packet)
 {
+    // 飞行终止在 Sub 中等价为强制加锁
     if (packet.param1 > 0.5f) {
         sub.arming.disarm(AP_Arming::Method::TERMINATION);
         return MAV_RESULT_ACCEPTED;
@@ -790,11 +839,13 @@ MAV_RESULT GCS_MAVLINK_Sub::handle_flight_termination(const mavlink_command_int_
 
 int32_t GCS_MAVLINK_Sub::global_position_int_alt() const
 {
+    // GLOBAL_POSITION_INT 使用毫米，这里把米转换成 mm
     return static_cast<int32_t>(sub.get_alt_msl() * 1000.0f);
 }
 
 int32_t GCS_MAVLINK_Sub::global_position_int_relative_alt() const
 {
+    // 相对高度同样按毫米上报
     return static_cast<int32_t>(sub.get_alt_rel() * 1000.0f);
 }
 
@@ -805,7 +856,7 @@ int16_t GCS_MAVLINK_Sub::high_latency_target_altitude() const
     Location global_position_current;
     UNUSED_RESULT(ahrs.get_location(global_position_current));
 
-    //return units are m
+    // 高延迟链路下的目标高度，单位为米
     if (sub.control_mode == Mode::Number::AUTO || sub.control_mode == Mode::Number::GUIDED) {
         return 0.01 * (global_position_current.alt + sub.pos_control.get_pos_error_U_cm());
     }
@@ -815,7 +866,7 @@ int16_t GCS_MAVLINK_Sub::high_latency_target_altitude() const
 
 uint8_t GCS_MAVLINK_Sub::high_latency_tgt_heading() const
 {
-    // return units are deg/2
+    // 高延迟链路下的目标航向，单位为 deg/2
     if (sub.control_mode == Mode::Number::AUTO || sub.control_mode == Mode::Number::GUIDED) {
         // need to convert -18000->18000 to 0->360/2
         return wrap_360_cd(sub.wp_nav.get_wp_bearing_to_destination_cd()) / 200;
@@ -825,7 +876,7 @@ uint8_t GCS_MAVLINK_Sub::high_latency_tgt_heading() const
     
 uint16_t GCS_MAVLINK_Sub::high_latency_tgt_dist() const
 {
-    // return units are dm
+    // 高延迟链路下的目标距离，单位为分米
     if (sub.control_mode == Mode::Number::AUTO || sub.control_mode == Mode::Number::GUIDED) {
         return MIN(sub.wp_nav.get_wp_distance_to_destination_cm() * 0.001, UINT16_MAX);
     }
@@ -834,7 +885,7 @@ uint16_t GCS_MAVLINK_Sub::high_latency_tgt_dist() const
 
 uint8_t GCS_MAVLINK_Sub::high_latency_tgt_airspeed() const
 {
-    // return units are m/s*5
+    // 高延迟链路下的目标速度，单位为 m/s*5
     if (sub.control_mode == Mode::Number::AUTO || sub.control_mode == Mode::Number::GUIDED) {
         return MIN((sub.pos_control.get_vel_desired_NEU_cms().length()/100) * 5, UINT8_MAX);
     }
@@ -846,6 +897,7 @@ uint8_t GCS_MAVLINK_Sub::high_latency_tgt_airspeed() const
 // Index starts at 1
 uint8_t GCS_MAVLINK_Sub::send_available_mode(uint8_t index) const
 {
+    // 上报支持的模式列表，供 GCS 动态构建模式选择界面
     const Mode* modes[] {
         &sub.mode_manual,
         &sub.mode_stabilize,
@@ -869,7 +921,7 @@ uint8_t GCS_MAVLINK_Sub::send_available_mode(uint8_t index) const
         return mode_count;
     }
 
-    // Ask the mode for its name and number
+    // 让每个模式对象自己提供名称和编号，避免这里硬编码字符串映射表
     const char* name = modes[index_zero]->name();
     const uint8_t mode_number = (uint8_t)modes[index_zero]->number();
 

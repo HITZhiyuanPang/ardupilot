@@ -1,13 +1,17 @@
+// terrain.cpp - 地形数据更新和日志
+// 对水下 ROV 来说，“地形”对应海底地形
+// AP_TERRAIN 库用于基于 GPS 的海底地形跟随（需要海图数据）
+
 #include "Sub.h"
 
-// update terrain data
+// terrain_update - 更新地形数据
+// 如果有地形高度数据，将其提供给测距仪用于省电模式判断
 void Sub::terrain_update()
 {
 #if AP_TERRAIN_AVAILABLE
     terrain.update();
 
-    // tell the rangefinder our height, so it can go into power saving
-    // mode if available
+    // 将地形高度提供给测距仪，以便在距离太远时进入省电模式
 #if AP_RANGEFINDER_ENABLED
     float height;
     if (terrain.height_above_terrain(height, true)) {
@@ -18,7 +22,7 @@ void Sub::terrain_update()
 }
 
 #if HAL_LOGGING_ENABLED
-// log terrain data - should be called at 1hz
+// terrain_logging - 记录地形数据（应以 1Hz 调用）
 void Sub::terrain_logging()
 {
 #if AP_TERRAIN_AVAILABLE

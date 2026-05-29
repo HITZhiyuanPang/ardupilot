@@ -1,31 +1,32 @@
-// ArduSub position hold flight mode
-// GPS required
-// Jacob Walser August 2016
+// mode_poshold.cpp - GPS 位置保持模式（Position Hold）
+// 需要 GPS 锁定
+// 飞手控制姿态/偏航/深度，飞控自动保持水平位置（经纬度）
+// 适合在水下定点悬停观察目标
+// 作者：Jacob Walser，2016 年 8 月
 
 #include "Sub.h"
 
 #if POSHOLD_ENABLED
 
-// poshold_init - initialise PosHold controller
+// poshold_init - 初始化位置保持控制器
 bool ModePoshold::init(bool ignore_checks)
 {
-    // fail to initialise PosHold mode if no GPS lock
+    // 没有 GPS 锁定则无法进入位置保持模式
     if (!sub.position_ok()) {
         return false;
     }
 
-    // initialize vertical speeds and acceleration
-    // All limits must be positive
+    // 初始化水平和垂直速度/加速度限制（所有限制必须为正值）
     position_control->NE_set_max_speed_accel_cm(g.pilot_speed, g.pilot_accel_z);
     position_control->NE_set_correction_speed_accel_cm(g.pilot_speed, g.pilot_accel_z);
     position_control->D_set_max_speed_accel_cm(sub.get_pilot_speed_dn(), g.pilot_speed_up, g.pilot_accel_z);
     position_control->D_set_correction_speed_accel_cm(sub.get_pilot_speed_dn(), g.pilot_speed_up, g.pilot_accel_z);
 
-    // initialise position and desired velocity
+    // 初始化位置控制器（从停止点开始，锁定当前位置为目标）
     position_control->NE_init_controller_stopping_point();
     position_control->D_init_controller();
 
-    // Stop all thrusters
+    // 停止所有推进器，放松姿态控制器
     attitude_control->set_throttle_out(NEUTRAL_THROTTLE ,true, g.throttle_filt);
     attitude_control->relax_attitude_controllers();
     position_control->D_relax_controller(0.5f);
@@ -35,15 +36,13 @@ bool ModePoshold::init(bool ignore_checks)
     return true;
 }
 
-// poshold_run - runs the PosHold controller
-// should be called at 100hz or more
+// poshold_run - 运行位置保持控制器（需 100Hz 或更高调用）
 void ModePoshold::run()
 {
     uint32_t tnow = AP_HAL::millis();
-    // When unarmed, disable motors and stabilization
+    // 未解锁：禁用推进器并放松稳定
     if (!motors.armed()) {
         motors.set_desired_spool_state(AP_Motors::DesiredSpoolState::GROUND_IDLE);
-        // Sub vehicles do not stabilize roll/pitch/yaw when not auto-armed (i.e. on the ground, pilot has never raised throttle)
         attitude_control->set_throttle_out(NEUTRAL_THROTTLE ,true, g.throttle_filt);
         attitude_control->relax_attitude_controllers();
         position_control->NE_init_controller_stopping_point();
@@ -52,48 +51,43 @@ void ModePoshold::run()
         return;
     }
 
-    // set motors to full range
+    // 使能推进器全量程输出
     motors.set_desired_spool_state(AP_Motors::DesiredSpoolState::THROTTLE_UNLIMITED);
 
     /////////////////////
-    // Update attitude //
+    // 姿态控制 //
 
-    // get pilot's desired yaw rate
+    // 获取飞手偏航速率输入（考虑死区和增益）
     float yaw_input = channel_yaw->pwm_to_angle_dz_trim(channel_yaw->get_dead_zone() * sub.gain, channel_yaw->get_radio_trim());
     float target_yaw_rate = sub.get_pilot_desired_yaw_rate(yaw_input);
 
-    // convert pilot input to lean angles
-    // To-Do: convert get_pilot_desired_lean_angles to return angles as floats
+    // 将飞手输入转换为倾斜角
     float target_roll, target_pitch;
     sub.get_pilot_desired_lean_angles(channel_roll->get_control_in(), channel_pitch->get_control_in(), target_roll, target_pitch, attitude_control->lean_angle_max_cd());
 
-    // update attitude controller targets
-    if (!is_zero(target_yaw_rate)) { // call attitude controller with rate yaw determined by pilot input
+    // 偏航逻辑：有输入则跟踪速率，无输入则保持上次航向（含 250ms 防回弹）
+    if (!is_zero(target_yaw_rate)) { // 有飞手偏航输入：跟踪角速率
         attitude_control->input_euler_angle_roll_pitch_euler_rate_yaw_cd(target_roll, target_pitch, target_yaw_rate);
         sub.last_pilot_heading_rad = ahrs.get_yaw_rad();
-        sub.last_pilot_yaw_input_ms = tnow; // time when pilot last changed heading
+        sub.last_pilot_yaw_input_ms = tnow;
 
-    } else { // hold current heading
+    } else { // 无偏航输入：保持当前航向
 
-        // this check is required to prevent bounce back after very fast yaw manoeuvres
-        // the inertia of the vehicle causes the heading to move slightly past the point when pilot input actually stopped
-        if (tnow < sub.last_pilot_yaw_input_ms + 250) { // give 250ms to slow down, then set target heading
-            target_yaw_rate = 0; // Stop rotation on yaw axis
-
-            // call attitude controller with target yaw rate = 0 to decelerate on yaw axis
+        // 250ms 内继续减速（车辆惯性导致实际停止稍晚于输入停止）
+        if (tnow < sub.last_pilot_yaw_input_ms + 250) {
+            target_yaw_rate = 0;
             attitude_control->input_euler_angle_roll_pitch_euler_rate_yaw_cd(target_roll, target_pitch, target_yaw_rate);
-            sub.last_pilot_heading_rad = ahrs.get_yaw_rad(); // update heading to hold
+            sub.last_pilot_heading_rad = ahrs.get_yaw_rad();
 
-        } else { // call attitude controller holding absolute bearing
+        } else { // 保持绝对航向角
             attitude_control->input_euler_angle_roll_pitch_yaw_cd(target_roll, target_pitch, rad_to_cd(sub.last_pilot_heading_rad), true);
         }
     }
 
-    // update z axis
+    // 更新垂直轴（深度控制）
     control_depth();
 
-    // update xy axis
-    // call this after Sub::get_pilot_desired_climb_rate is called so that THR_DZ is reasonable
+    // 更新水平轴（位置控制，在深度更新后调用以获得正确的 THR_DZ）
     control_horizontal();
 }
 

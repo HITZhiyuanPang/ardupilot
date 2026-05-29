@@ -1,62 +1,60 @@
+// mode_circle.cpp - 圆形绕飞模式（Circle Mode）
+// 潜器绕以当前位置为中心的圆形轨迹运动
+// 圆心在进入模式时自动设置（基于当前速度方向）
+// 飞手可以：
+//   - 用偏航摇杆覆盖自动偏航（朝向圆心）
+//   - 用油门控制深度
+//   - 半径和角速度由 CIRCLE_RADIUS 和 CIRCLE_RATE 参数控制
+
 #include "Sub.h"
 
-/*
- * control_circle.pde - init and run calls for circle flight mode
- */
-
-// circle_init - initialise circle controller flight mode
+// circle_init - 初始化圆形导航控制器
 bool ModeCircle::init(bool ignore_checks)
 {
     if (!sub.position_ok()) {
         return false;
     }
 
-    sub.circle_pilot_yaw_override = false;
+    sub.circle_pilot_yaw_override = false;  // 初始不允许飞手覆盖偏航
 
-    // initialize speeds and accelerations
-    // All limits must be positive
+    // 初始化水平和垂直速度/加速度限制（所有限制必须为正值）
     position_control->NE_set_max_speed_accel_cm(sub.wp_nav.get_default_speed_NE_cms(), sub.wp_nav.get_wp_acceleration_cmss());
     position_control->NE_set_correction_speed_accel_cm(sub.wp_nav.get_default_speed_NE_cms(), sub.wp_nav.get_wp_acceleration_cmss());
     position_control->D_set_max_speed_accel_cm(sub.get_pilot_speed_dn(), g.pilot_speed_up, g.pilot_accel_z);
     position_control->D_set_correction_speed_accel_cm(sub.get_pilot_speed_dn(), g.pilot_speed_up, g.pilot_accel_z);
 
-    // initialise circle controller including setting the circle center based on vehicle speed
+    // 初始化圆形控制器（根据当前速度自动设置圆心位置）
     sub.circle_nav.init();
 
     return true;
 }
 
-// circle_run - runs the circle flight mode
-// should be called at 100hz or more
+// circle_run - 运行圆形导航控制器（需 100Hz 或更高频率调用）
 void ModeCircle::run()
 {
     float target_yaw_rate = 0;
     float target_climb_rate = 0;
 
-    // update parameters, to allow changing at runtime
-    // All limits must be positive
+    // 实时更新速度/加速度限制（允许运行时修改参数）
     position_control->NE_set_max_speed_accel_cm(sub.wp_nav.get_default_speed_NE_cms(), sub.wp_nav.get_wp_acceleration_cmss());
     position_control->D_set_max_speed_accel_cm(sub.get_pilot_speed_dn(), g.pilot_speed_up, g.pilot_accel_z);
 
-    // check for any change in params and update in real time
+    // 检查参数变化并实时更新圆形控制器
     sub.circle_nav.check_param_change();
 
-    // if not armed set throttle to zero and exit immediately
+    // 未解锁：禁用推进器，放松姿态控制器，重置圆形控制器
     if (!motors.armed()) {
-        // To-Do: add some initialisation of position controllers
         motors.set_desired_spool_state(AP_Motors::DesiredSpoolState::GROUND_IDLE);
-        // Sub vehicles do not stabilize roll/pitch/yaw when disarmed
         attitude_control->set_throttle_out(NEUTRAL_THROTTLE,true,g.throttle_filt);
         attitude_control->relax_attitude_controllers();
         sub.circle_nav.init();
         return;
     }
 
-    // process pilot inputs
-    // get pilot's desired yaw rate
+    // 处理飞手偏航输入（飞手可以覆盖自动朝向圆心的偏航）
     target_yaw_rate = sub.get_pilot_desired_yaw_rate(channel_yaw->get_control_in());
     if (!is_zero(target_yaw_rate)) {
-        sub.circle_pilot_yaw_override = true;
+        sub.circle_pilot_yaw_override = true;  // 标记飞手正在覆盖偏航
     }
 
     // get pilot desired climb rate
